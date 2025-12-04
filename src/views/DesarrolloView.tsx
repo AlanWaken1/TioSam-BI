@@ -1,7 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
+import { supabase } from '@/lib/supabase';
+import { useConfirmDialog } from '@/hooks/useConfirmDialog';
 import { 
   Upload, 
   Sparkles,
@@ -30,6 +32,7 @@ import { FileUploader } from '../components/dashboard/FileUploader';
 import { DataTable } from '../components/dashboard/DataTable';
 import { AIAnalystCard } from '../components/dashboard/AIAnalystCard';
 import { DynamicChart } from '../components/dashboard/DynamicChart';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 interface DigitalRecord {
   id?: string;
@@ -62,69 +65,89 @@ export default function DesarrolloView() {
   const [showUploader, setShowUploader] = useState(false);
   const [selectedFile, setSelectedFile] = useState<ProcessedFile | null>(null);
 
-  const handleDataParsed = (data: any[], fileName?: string) => {
-    console.log('Datos CSV parseados:', data);
-    
-    const fileId = `file-${Date.now()}`;
-    
-    const newRecords: DigitalRecord[] = data.map((row, index) => {
-      const findValue = (variants: string[]) => {
-        for (const key of variants) {
-          if (row[key] !== undefined && row[key] !== null && row[key] !== '') {
-            return row[key];
-          }
+  const [isLoading, setIsLoading] = useState(true);
+  const { confirm, showSuccess, showError } = useConfirmDialog();
+
+  const fetchData = async () => {
+    setIsLoading(true);
+    try {
+      const { data: records, error: recordsError } = await supabase
+        .from('desarrollo')
+        .select('*')
+        .order('fecha', { ascending: false });
+
+      if (recordsError) throw recordsError;
+
+      const { data: logs, error: logsError } = await supabase
+        .from('upload_logs')
+        .select('*')
+        .eq('dimension', 'Desarrollo Digital')
+        .order('created_at', { ascending: false });
+
+      if (logsError) throw logsError;
+
+      const formattedRecords: DigitalRecord[] = (records || []).map((r: any) => ({
+        id: r.id,
+        fecha: r.fecha,
+        canal: r.canal,
+        campana: r.campana,
+        inversion: Number(r.inversion),
+        alcance: Number(r.alcance),
+        clics: Number(r.clics),
+        mensajes: Number(r.mensajes),
+        fileId: r.upload_id,
+        fecha_registro: r.created_at
+      }));
+
+      setAllRecords(formattedRecords);
+
+      // Transform logs
+      const formattedLogs: ProcessedFile[] = (logs || []).map((l: any) => {
+        const fileRecords = formattedRecords.filter(r => r.fileId === l.id);
+        
+        // Calculate metrics from records
+        let periodoInicio = 'N/A';
+        let periodoFin = 'N/A';
+        let totalProcesado = 0;
+
+        if (fileRecords.length > 0) {
+          // Sort by date to find start/end
+          const sortedDates = [...fileRecords].sort((a, b) => new Date(a.fecha).getTime() - new Date(b.fecha).getTime());
+          periodoInicio = sortedDates[0].fecha;
+          periodoFin = sortedDates[sortedDates.length - 1].fecha;
+          
+          // Sum total investment
+          totalProcesado = fileRecords.reduce((sum, r) => sum + r.inversion, 0);
         }
-        return null;
-      };
 
-      // Mapeo basado en el esquema del usuario (Marketing Ads):
-      // ['Fecha Reporte', 'Plataforma', 'Campaña', 'Inversión', 'Alcance', 'Clics', 'Mensajes']
-      const fecha = findValue(['Fecha Reporte', 'Fecha', 'date', 'Date']) || new Date().toISOString().split('T')[0];
-      const canal = findValue(['Plataforma', 'plataforma', 'canal', 'Canal']) || 'Sin plataforma';
-      const campana = findValue(['Campaña', 'campaña', 'campaign', 'Campaign']) || 'General';
-      const inversion = parseFloat(findValue(['Inversión', 'inversión', 'inversion', 'Inversion', 'gasto', 'Gasto']) || 0);
-      const alcance = parseFloat(findValue(['Alcance', 'alcance', 'reach', 'Reach', 'impresiones', 'Impresiones']) || 0);
-      const clics = parseFloat(findValue(['Clics', 'clics', 'clicks', 'Clicks']) || 0);
-      const mensajes = parseFloat(findValue(['Mensajes', 'mensajes', 'messages', 'Messages']) || 0);
+        return {
+          id: l.id,
+          fileName: l.filename,
+          periodoInicio,
+          periodoFin,
+          fechaCarga: l.created_at,
+          totalProcesado,
+          totalRegistros: l.total_rows,
+          status: l.status === 'success' ? 'integrado' : 'error',
+          records: fileRecords
+        };
+      });
 
-      return {
-        id: `dig-${Date.now()}-${index}`,
-        fecha,
-        canal,
-        campana,
-        inversion,
-        alcance,
-        clics,
-        mensajes,
-        fecha_registro: new Date().toISOString(),
-        fileId,
-      };
-    });
+      setProcessedFiles(formattedLogs);
 
-    console.log('Registros procesados:', newRecords);
-    setAllRecords([...allRecords, ...newRecords]);
+    } catch (error) {
+      console.error('Error fetching data:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
-    // Extraer periodo de los datos
-    const fechas = newRecords.map(r => r.fecha).sort();
-    const periodoInicio = fechas.length > 0 ? fechas[0] : 'N/A';
-    const periodoFin = fechas.length > 0 ? fechas[fechas.length - 1] : 'N/A';
-    
-    // Calcular total procesado (suma de inversión)
-    const totalProcesado = newRecords.reduce((sum, r) => sum + r.inversion, 0);
+  useEffect(() => {
+    fetchData();
+  }, []);
 
-    const newFile: ProcessedFile = {
-      id: fileId,
-      fileName: fileName || `MKT_Archivo_${new Date().toLocaleDateString('es-MX').replace(/\//g, '-')}.xlsx`,
-      periodoInicio,
-      periodoFin,
-      fechaCarga: new Date().toISOString(),
-      totalProcesado,
-      totalRegistros: newRecords.length,
-      status: 'integrado',
-      records: newRecords,
-    };
-
-    setProcessedFiles([newFile, ...processedFiles]);
+  const handleDataParsed = (data: any[], fileName?: string) => {
+    fetchData();
     setShowUploader(false);
   };
 
@@ -132,13 +155,46 @@ export default function DesarrolloView() {
     console.log('Editar registro:', row);
   };
 
-  const handleDelete = (row: DigitalRecord) => {
-    setAllRecords(allRecords.filter(r => r.id !== row.id));
+  const handleDelete = async (row: DigitalRecord) => {
+    if (!row.id) return;
+    
+    const confirmed = await confirm(`¿Eliminar campaña ${row.campana}?`);
+    if (!confirmed) return;
+
+    try {
+      const { error } = await supabase
+        .from('desarrollo')
+        .delete()
+        .eq('id', row.id);
+
+      if (error) throw error;
+
+      setAllRecords(allRecords.filter(r => r.id !== row.id));
+      showSuccess('Registro eliminado exitosamente');
+    } catch (error) {
+      console.error('Error deleting record:', error);
+      showError('Error al eliminar el registro');
+    }
   };
 
   const handleCreate = () => {
     setShowUploader(true);
   };
+
+  // Calcular rango de fechas dinámico
+  const dateRange = allRecords.length > 0 ? (() => {
+    const dates = allRecords.map(r => new Date(r.fecha));
+    const minDate = new Date(Math.min(...dates.map(d => d.getTime())));
+    const maxDate = new Date(Math.max(...dates.map(d => d.getTime())));
+    
+    const formatDate = (date: Date) => date.toLocaleDateString('es-MX', { day: 'numeric', month: 'short' });
+    const formatMonth = (date: Date) => date.toLocaleDateString('es-MX', { month: 'long', year: 'numeric' });
+    
+    if (minDate.getMonth() === maxDate.getMonth() && minDate.getFullYear() === maxDate.getFullYear()) {
+      return { text: formatMonth(minDate), isSameMonth: true };
+    }
+    return { text: `${formatDate(minDate)} - ${formatDate(maxDate)}`, isSameMonth: false };
+  })() : { text: 'Sin datos', isSameMonth: false };
 
   // Calcular métricas
   const totalInversion = allRecords.reduce((sum, r) => sum + r.inversion, 0);
@@ -146,21 +202,62 @@ export default function DesarrolloView() {
   const totalInteracciones = allRecords.reduce((sum, r) => sum + r.clics + r.mensajes, 0);
   const costoPorResultado = totalInteracciones > 0 ? totalInversion / totalInteracciones : 0;
 
+  // Análisis de mejor periodo (agrupado por semana)
+  const weeklyData = allRecords.reduce((acc: any, record) => {
+    const date = new Date(record.fecha);
+    const weekKey = `Semana ${Math.ceil(date.getDate() / 7)} - ${date.toLocaleDateString('es-MX', { month: 'short' })}`;
+    
+    if (!acc[weekKey]) {
+      acc[weekKey] = { inversion: 0, alcance: 0, interacciones: 0 };
+    }
+    acc[weekKey].inversion += record.inversion;
+    acc[weekKey].alcance += record.alcance;
+    acc[weekKey].interacciones += (record.clics + record.mensajes);
+    return acc;
+  }, {});
+
+  const weeklyArray = Object.entries(weeklyData).map(([week, data]: [string, any]) => ({
+    week,
+    inversion: data.inversion,
+    alcance: data.alcance,
+    interacciones: data.interacciones
+  }));
+
+  const mejorSemanaInversion = weeklyArray.length > 0 
+    ? weeklyArray.reduce((max, current) => current.inversion > max.inversion ? current : max, weeklyArray[0])
+    : null;
+
+  const mejorSemanaAlcance = weeklyArray.length > 0
+    ? weeklyArray.reduce((max, current) => current.alcance > max.alcance ? current : max, weeklyArray[0])
+    : null;
+
   // Preparar datos para gráficos
   const chartDataByPlatform = allRecords.reduce((acc: any[], record) => {
     const existing = acc.find(item => item.name === record.canal);
     if (existing) {
       existing.inversion += record.inversion;
       existing.resultados += (record.clics + record.mensajes);
+      existing.alcance += record.alcance;
     } else {
       acc.push({
         name: record.canal,
         inversion: record.inversion,
         resultados: (record.clics + record.mensajes),
+        alcance: record.alcance,
       });
     }
     return acc;
   }, []);
+
+  // Calcular ROI por plataforma (Resultados por cada $ invertido)
+  const chartDataROI = chartDataByPlatform
+    .map(platform => ({
+      name: platform.name,
+      roi: platform.inversion > 0 ? platform.resultados / platform.inversion : 0,
+      inversion: platform.inversion,
+      resultados: platform.resultados
+    }))
+    .sort((a, b) => b.roi - a.roi);
 
   const chartDataByCampaignCPR = allRecords
     .map(record => ({
@@ -168,8 +265,11 @@ export default function DesarrolloView() {
       cpr: (record.clics + record.mensajes) > 0 ? record.inversion / (record.clics + record.mensajes) : 0,
       inversion: record.inversion
     }))
-    .sort((a, b) => a.cpr - b.cpr) // Ordenar por menor costo (más eficiente)
-    .slice(0, 7); // Top 7 campañas
+    .sort((a, b) => a.cpr - b.cpr)
+    .slice(0, 7);
+
+  // Gráfica de inversión por semana
+  const chartDataWeekly = weeklyArray.sort((a, b) => a.week.localeCompare(b.week));
 
   const columns = [
     { key: 'fecha' as keyof DigitalRecord, label: 'Fecha' },
@@ -263,7 +363,7 @@ export default function DesarrolloView() {
             <p className="text-3xl font-bold text-white mb-2">${totalInversion.toLocaleString()}</p>
             <div className="flex items-center gap-1 text-xs text-white/80 font-medium">
               <TrendingUp className="w-3 h-3" />
-              <span>Presupuesto ejercido</span>
+              <span>Periodo: {dateRange.text}</span>
             </div>
           </CardContent>
         </Card>
@@ -280,7 +380,7 @@ export default function DesarrolloView() {
             <p className="text-3xl font-bold text-white mb-2">{totalAlcance.toLocaleString()}</p>
             <div className="flex items-center gap-1 text-xs text-white/80 font-medium">
               <Users className="w-3 h-3" />
-              <span>Personas alcanzadas</span>
+              <span>Periodo: {dateRange.text}</span>
             </div>
           </CardContent>
         </Card>
@@ -297,7 +397,7 @@ export default function DesarrolloView() {
             <p className="text-3xl font-bold text-white mb-2">{totalInteracciones.toLocaleString()}</p>
             <div className="flex items-center gap-1 text-xs text-white/80 font-medium">
               <MessageCircle className="w-3 h-3" />
-              <span>Clics + Mensajes</span>
+              <span>{allRecords.length} campañas</span>
             </div>
           </CardContent>
         </Card>
@@ -314,7 +414,7 @@ export default function DesarrolloView() {
             <p className="text-3xl font-bold text-white mb-2">${costoPorResultado.toFixed(2)}</p>
             <div className="flex items-center gap-1 text-xs text-white/80 font-medium">
               <Zap className="w-3 h-3" />
-              <span>Eficiencia de campaña</span>
+              <span>{totalInteracciones > 0 ? `${totalInteracciones} resultados` : 'Sin datos'}</span>
             </div>
           </CardContent>
         </Card>
@@ -343,16 +443,134 @@ export default function DesarrolloView() {
               />
             </div>
             <div>
-              <DynamicChart
-                data={chartDataByCampaignCPR}
-                type="bar"
-                title="Eficiencia por Campaña (CPR)"
-                description="Costo por Resultado (Menor es mejor)"
-                xKey="cpr"
-                yKey="cpr"
-                nameKey="name"
-              />
+              <Card className="h-full border border-gray-200 bg-white shadow-sm hover:shadow-md transition-shadow">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-lg font-semibold text-gray-800">Eficiencia por Campaña (CPR)</CardTitle>
+                  <CardDescription className="text-sm text-gray-500">
+                    Costo por Resultado - Menor es mejor • <span className="font-mono text-xs">Inversión ÷ Interacciones</span>
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="h-[300px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart
+                        data={chartDataByCampaignCPR}
+                        margin={{ top: 5, right: 30, left: 10, bottom: 60 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                        <XAxis 
+                          dataKey="name" 
+                          angle={-45}
+                          textAnchor="end"
+                          height={80}
+                          tick={{ fill: '#64748b', fontSize: 10 }}
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <YAxis 
+                          tick={{ fill: '#64748b', fontSize: 11 }}
+                          axisLine={false}
+                          tickLine={false}
+                          tickFormatter={(value) => `$${value.toFixed(2)}`}
+                        />
+                        <Tooltip 
+                          cursor={{ fill: '#f1f5f9' }}
+                          contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                          formatter={(value: number, name: string, props: any) => [
+                            `$${value.toFixed(2)} por resultado (inv: $${props.payload.inversion.toLocaleString()})`,
+                            'CPR'
+                          ]}
+                          labelFormatter={(label) => `Campaña: ${label}`}
+                        />
+                        <Bar dataKey="cpr" fill="#10b981" radius={[4, 4, 0, 0]} barSize={32} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </CardContent>
+              </Card>
             </div>
+          </div>
+
+          {/* Nueva fila: Gráficas adicionales */}
+          <div className="grid grid-cols-2 gap-6">
+            {/* ROI por Plataforma */}
+            <Card className="border border-gray-200 bg-white shadow-sm hover:shadow-md transition-shadow">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-lg font-semibold text-gray-800">ROI por Plataforma</CardTitle>
+                <CardDescription className="text-sm text-gray-500">
+                  Resultados obtenidos por cada $ invertido • <span className="font-mono text-xs">Cálculo: Interacciones ÷ Inversión</span>
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="h-[250px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart data={chartDataROI} layout="vertical" margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
+                      <CartesianGrid strokeDasharray="3 3" horizontal={true} vertical={false} stroke="#e2e8f0" />
+                      <XAxis type="number" hide />
+                      <YAxis 
+                        dataKey="name" 
+                        type="category" 
+                        width={80}
+                        tick={{ fill: '#64748b', fontSize: 11 }}
+                        axisLine={false}
+                        tickLine={false}
+                      />
+                      <Tooltip 
+                        cursor={{ fill: '#f1f5f9' }}
+                        contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                        formatter={(value: number, name: string, props: any) => [
+                          `${value.toFixed(2)} resultados/$1 (${props.payload.resultados} total)`,
+                          'ROI'
+                        ]}
+                      />
+                      <Bar dataKey="roi" fill="#3b82f6" radius={[0, 4, 4, 0]} barSize={20} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Mejor Semana */}
+            <Card className="border border-gray-200 bg-white shadow-sm hover:shadow-md transition-shadow">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-lg font-semibold text-gray-800">Análisis Semanal</CardTitle>
+                <CardDescription className="text-sm text-gray-500">Mejores periodos de inversión y alcance</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-4">
+                  {mejorSemanaInversion && (
+                    <div className="p-4 bg-gradient-to-r from-orange-50 to-red-50 rounded-lg border border-orange-200">
+                      <div className="flex items-center gap-2 mb-2">
+                        <div className="w-8 h-8 bg-orange-500 rounded-lg flex items-center justify-center">
+                          <DollarSign className="w-4 h-4 text-white" />
+                        </div>
+                        <div>
+                          <p className="text-xs text-orange-600 font-medium">Mejor Semana - Inversión</p>
+                          <p className="text-sm font-semibold text-orange-900">{mejorSemanaInversion.week}</p>
+                        </div>
+                      </div>
+                      <p className="text-2xl font-bold text-orange-700">${mejorSemanaInversion.inversion.toLocaleString()}</p>
+                      <p className="text-xs text-orange-600 mt-1">{mejorSemanaInversion.interacciones.toLocaleString()} interacciones</p>
+                    </div>
+                  )}
+                  {mejorSemanaAlcance && (
+                    <div className="p-4 bg-gradient-to-r from-blue-50 to-purple-50 rounded-lg border border-blue-200">
+                      <div className="flex items-center gap-2 mb-2">
+                        <div className="w-8 h-8 bg-blue-500 rounded-lg flex items-center justify-center">
+                          <Eye className="w-4 h-4 text-white" />
+                        </div>
+                        <div>
+                          <p className="text-xs text-blue-600 font-medium">Mejor Semana - Alcance</p>
+                          <p className="text-sm font-semibold text-blue-900">{mejorSemanaAlcance.week}</p>
+                        </div>
+                      </div>
+                      <p className="text-2xl font-bold text-blue-700">{mejorSemanaAlcance.alcance.toLocaleString()}</p>
+                      <p className="text-xs text-blue-600 mt-1">personas alcanzadas</p>
+                    </div>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
           </div>
         </TabsContent>
 
@@ -445,26 +663,38 @@ export default function DesarrolloView() {
                               </span>
                             </td>
                             <td className="p-3">
-                              <div className="flex items-center justify-center gap-2">
+                              <div className="flex items-center gap-2">
                                 <Button
                                   variant="ghost"
                                   size="sm"
-                                  className="gap-1.5 hover:bg-blue-50 hover:text-blue-700"
+                                  className="text-blue-600 hover:text-blue-800 hover:bg-blue-50"
                                   onClick={() => setSelectedFile(file)}
-                                  title="Inspeccionar datos crudos de este archivo"
                                 >
                                   <Eye className="w-4 h-4" />
-                                  Ver Detalle
                                 </Button>
                                 <Button
                                   variant="ghost"
                                   size="sm"
-                                  className="hover:bg-red-50 hover:text-red-700"
-                                  onClick={() => {
-                                    setProcessedFiles(processedFiles.filter(f => f.id !== file.id));
-                                    setAllRecords(allRecords.filter(r => r.fileId !== file.id));
+                                  className="text-red-600 hover:text-red-800 hover:bg-red-50"
+                                  onClick={async () => {
+                                    const confirmed = await confirm('¿Eliminar este archivo y todos sus registros?');
+                                    if (confirmed) {
+                                      try {
+                                        const { error } = await supabase
+                                          .from('upload_logs')
+                                          .delete()
+                                          .eq('id', file.id);
+                                        
+                                        if (error) throw error;
+                                        
+                                        await fetchData();
+                                        showSuccess('Archivo eliminado correctamente');
+                                      } catch (err) {
+                                        console.error('Error deleting file:', err);
+                                        showError('Error al eliminar el archivo');
+                                      }
+                                    }
                                   }}
-                                  title="Eliminar archivo del warehouse"
                                 >
                                   <Trash2 className="w-4 h-4" />
                                 </Button>

@@ -62,69 +62,39 @@ export function FileUploader({ onDataParsed, expectedColumns, dimensionName }: F
            validExtensions.some(ext => file.name.toLowerCase().endsWith(ext));
   };
 
-  const processFile = (file: File) => {
+  const processFile = async (file: File) => {
     setFile(file);
     setIsProcessing(true);
     setSuccess(false);
 
-    const fileExtension = file.name.toLowerCase().split('.').pop();
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('dimension', dimensionName || 'General');
 
-    if (fileExtension === 'csv') {
-      // Procesar CSV con PapaParse
-      Papa.parse(file, {
-        header: true,
-        skipEmptyLines: true,
-        complete: (results) => {
-          console.log('CSV Parsed:', results.data);
-          onDataParsed(results.data, file.name);
-          setIsProcessing(false);
-          setSuccess(true);
-          resetAfterDelay();
-        },
-        error: (error) => {
-          console.error('Error parsing CSV:', error);
-          setIsProcessing(false);
-          alert('Error al procesar el archivo CSV');
-        },
+    try {
+      const response = await fetch('/api/upload', {
+        method: 'POST',
+        body: formData,
       });
-    } else if (fileExtension === 'xlsx' || fileExtension === 'xls') {
-      // Procesar Excel con XLSX
-      const reader = new FileReader();
+
+      if (!response.ok) {
+        throw new Error('Upload failed');
+      }
+
+      const result = await response.json();
+      console.log('Upload success:', result);
       
-      reader.onload = (e) => {
-        try {
-          const data = e.target?.result;
-          const workbook = XLSX.read(data, { type: 'binary' });
-          
-          // Obtener la primera hoja
-          const firstSheetName = workbook.SheetNames[0];
-          const worksheet = workbook.Sheets[firstSheetName];
-          
-          // Convertir a JSON
-          const jsonData = XLSX.utils.sheet_to_json(worksheet, { 
-            raw: false, // Mantener formato de texto
-            defval: '' // Valor por defecto para celdas vacías
-          });
-          
-          console.log('Excel Parsed:', jsonData);
-          onDataParsed(jsonData, file.name);
-          setIsProcessing(false);
-          setSuccess(true);
-          resetAfterDelay();
-        } catch (error) {
-          console.error('Error parsing Excel:', error);
-          setIsProcessing(false);
-          alert('Error al procesar el archivo Excel');
-        }
-      };
+      // Notify parent that upload is complete. 
+      // We pass empty array because data is now in DB.
+      onDataParsed([], file.name); 
       
-      reader.onerror = () => {
-        console.error('Error reading file');
-        setIsProcessing(false);
-        alert('Error al leer el archivo');
-      };
-      
-      reader.readAsBinaryString(file);
+      setIsProcessing(false);
+      setSuccess(true);
+      resetAfterDelay();
+    } catch (error) {
+      console.error('Error uploading file:', error);
+      setIsProcessing(false);
+      alert('Error al subir el archivo');
     }
   };
 

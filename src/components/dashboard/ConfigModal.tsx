@@ -14,25 +14,11 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog';
-import { setGeminiAPIKey, isGeminiConfigured } from '@/lib/ai/gemini';
+// import { setGeminiAPIKey, isGeminiConfigured } from '@/lib/ai/gemini';
 
 export function ConfigModal() {
   const [open, setOpen] = useState(false);
-  const [geminiKey, setGeminiKey] = useState('');
-  const [isConfigured, setIsConfigured] = useState(false);
-
-  useEffect(() => {
-    setIsConfigured(isGeminiConfigured());
-  }, []);
-
-  const handleSaveGemini = () => {
-    if (geminiKey.trim()) {
-      setGeminiAPIKey(geminiKey);
-      setIsConfigured(true);
-      alert('✅ API Key de Gemini configurada correctamente');
-      setOpen(false);
-    }
-  };
+  // Configuración gestionada por variables de entorno del servidor
 
   return (
     <Dialog open={open} onOpenChange={setOpen}>
@@ -55,55 +41,24 @@ export function ConfigModal() {
         </DialogHeader>
 
         <div className="space-y-6">
-          {/* Gemini API Key */}
-          <Card className={isConfigured ? 'border-green-300 bg-green-50' : 'border-blue-300 bg-blue-50'}>
+          {/* Gemini Info */}
+          <Card className="border-blue-300 bg-blue-50">
             <CardHeader>
-              <CardTitle className="flex items-center justify-between text-base">
-                <div className="flex items-center gap-2">
-                  <Key className="w-4 h-4" />
-                  Google Gemini API
-                </div>
-                {isConfigured ? (
-                  <span className="flex items-center gap-1 text-xs font-normal text-green-700">
-                    <Check className="w-3 h-3" />
-                    Configurado
-                  </span>
-                ) : (
-                  <span className="flex items-center gap-1 text-xs font-normal text-orange-700">
-                    <X className="w-3 h-3" />
-                    No configurado
-                  </span>
-                )}
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Key className="w-4 h-4" />
+                Google Gemini API (GenAI SDK)
               </CardTitle>
               <CardDescription>
-                Necesaria para el AI Analyst y búsqueda en lenguaje natural
+                Motor de inteligencia artificial para análisis y predicciones
               </CardDescription>
             </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor="gemini-key">API Key</Label>
-                <Input
-                  id="gemini-key"
-                  type="password"
-                  placeholder="AIza..."
-                  value={geminiKey}
-                  onChange={(e) => setGeminiKey(e.target.value)}
-                />
-                <p className="text-xs text-gray-600">
-                  Obtén tu API key gratuita en{' '}
-                  <a
-                    href="https://makersuite.google.com/app/apikey"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-blue-600 hover:underline"
-                  >
-                    Google AI Studio
-                  </a>
-                </p>
+            <CardContent>
+              <p className="text-sm text-gray-700 mb-2">
+                La integración con Gemini 2.0 Flash está configurada a nivel de servidor.
+              </p>
+              <div className="bg-white p-3 rounded border border-blue-200 text-xs font-mono text-gray-600">
+                Asegúrate de tener <strong>GEMINI_API_KEY</strong> en tu archivo <strong>.env.local</strong>
               </div>
-              <Button onClick={handleSaveGemini} className="w-full">
-                Guardar API Key de Gemini
-              </Button>
             </CardContent>
           </Card>
 

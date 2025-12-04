@@ -1,21 +1,21 @@
-import { GoogleGenAI } from "@google/genai";
+import Anthropic from '@anthropic-ai/sdk';
 
-// Función para obtener la instancia de Google GenAI
-function getGenAI(): GoogleGenAI {
-  // The client gets the API key from the environment variable `GEMINI_API_KEY`.
-  // No explicit key needed in constructor if env var is set, but we can pass it to be safe if we read it manually.
-  const apiKey = process.env.GEMINI_API_KEY;
+// Función para obtener la instancia de Anthropic
+function getAnthropic(): Anthropic {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
   
   if (!apiKey) {
-    throw new Error('GEMINI_API_KEY no está configurada en las variables de entorno.');
+    throw new Error('ANTHROPIC_API_KEY no está configurada en las variables de entorno.');
   }
   
-  return new GoogleGenAI({ apiKey });
+  return new Anthropic({
+    apiKey: apiKey,
+  });
 }
 
 export async function analyzeDataWithAI(data: any[], dimensionName: string): Promise<string> {
   try {
-    const ai = getGenAI();
+    const anthropic = getAnthropic();
     
     const prompt = `
 Eres un analista de Business Intelligence experto. Analiza los siguientes datos de la dimensión "${dimensionName}" y proporciona un resumen ejecutivo en español con:
@@ -31,15 +31,21 @@ ${JSON.stringify(data.slice(0, 50), null, 2)}
 Formatea tu respuesta en bullet points claros y concisos. Usa markdown básico (negritas) para resaltar puntos importantes.
 `;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.5-flash", // Using 2.0-flash as 2.5 might be a typo or very new, but user asked for 2.5. Let's try 2.0-flash first as it is definitely in the new SDK docs, or stick to user request if I want to be compliant. 
-      // Wait, user explicitly said "gemini-2.5-flash" from docs. I will use that.
-      contents: prompt,
+    const message = await anthropic.messages.create({
+      model: "claude-sonnet-4-5",
+      max_tokens: 1000,
+      messages: [{ role: "user", content: prompt }],
     });
 
-    return response.text || 'No se pudo generar el análisis.';
+    // Handle the content block correctly
+    const contentBlock = message.content[0];
+    if (contentBlock.type === 'text') {
+        return contentBlock.text;
+    }
+    return 'No se pudo generar el análisis (formato inesperado).';
+
   } catch (error: any) {
-    console.error('Error analyzing with Gemini GenAI:', error);
+    console.error('Error analyzing with Anthropic:', error);
     throw new Error(`Error al analizar datos: ${error.message || 'Error desconocido'}`);
   }
 }
@@ -49,7 +55,7 @@ export async function interpretNaturalLanguageQuery(query: string): Promise<{
   filters: Record<string, any>;
 }> {
   try {
-    const ai = getGenAI();
+    const anthropic = getAnthropic();
 
     const prompt = `
 Eres un asistente de BI. El usuario busca: "${query}"
@@ -71,12 +77,17 @@ Ejemplos:
 Responde SOLO con el JSON, sin texto adicional.
 `;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-2.0-flash",
-      contents: prompt,
+    const message = await anthropic.messages.create({
+      model: "claude-3-haiku-20240307",
+      max_tokens: 1024,
+      messages: [{ role: "user", content: prompt }],
     });
 
-    const text = response.text?.trim() || '';
+    const contentBlock = message.content[0];
+    let text = '';
+    if (contentBlock.type === 'text') {
+        text = contentBlock.text.trim();
+    }
     
     // Extraer JSON de la respuesta
     const jsonMatch = text.match(/\{[\s\S]*\}/);

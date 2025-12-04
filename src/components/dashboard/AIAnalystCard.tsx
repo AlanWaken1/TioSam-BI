@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { Sparkles, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { analyzeDataWithAI } from '@/lib/ai/gemini';
+// import { analyzeDataWithAI } from '@/lib/ai/gemini'; // Moved to server-side API
 import { motion } from 'motion/react';
 
 interface AIAnalystCardProps {
@@ -28,21 +28,36 @@ export function AIAnalystCard({ data, dimensionName }: AIAnalystCardProps) {
     setDisplayedText('');
 
     try {
-      const result = await analyzeDataWithAI(data, dimensionName);
-      setAnalysis(result);
+      const response = await fetch('/api/ai/analyze', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ data, dimensionName }),
+      });
+
+      const result = await response.json();
+
+      if (!response.ok) {
+        throw new Error(result.error || 'Error al analizar datos');
+      }
+
+      const analysisText = result.analysis;
+      setAnalysis(analysisText);
 
       // Typewriter effect
       let index = 0;
       const interval = setInterval(() => {
-        if (index < result.length) {
-          setDisplayedText((prev) => prev + result[index]);
+        if (index < analysisText.length) {
+          setDisplayedText((prev) => prev + analysisText[index]);
           index++;
         } else {
           clearInterval(interval);
         }
-      }, 20);
+      }, 10); // Faster typing speed
     } catch (error: any) {
-      alert(error.message);
+      console.error('Analysis error:', error);
+      setDisplayedText(`Error: ${error.message}. Por favor verifica tu configuración de API Key.`);
     } finally {
       setIsAnalyzing(false);
     }

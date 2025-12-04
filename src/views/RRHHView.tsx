@@ -1,7 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
+import { supabase } from '@/lib/supabase';
+import { useConfirmDialog } from '@/hooks/useConfirmDialog';
 import { 
   Upload, 
   Sparkles,
@@ -29,6 +31,7 @@ import { FileUploader } from '../components/dashboard/FileUploader';
 import { DataTable } from '../components/dashboard/DataTable';
 import { AIAnalystCard } from '../components/dashboard/AIAnalystCard';
 import { DynamicChart } from '../components/dashboard/DynamicChart';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 interface HRRecord {
   id?: string;
@@ -61,69 +64,89 @@ export default function RRHHView() {
   const [showUploader, setShowUploader] = useState(false);
   const [selectedFile, setSelectedFile] = useState<ProcessedFile | null>(null);
 
-  const handleDataParsed = (data: any[], fileName?: string) => {
-    console.log('Datos CSV parseados:', data);
-    
-    const fileId = `file-${Date.now()}`;
-    
-    const newRecords: HRRecord[] = data.map((row, index) => {
-      const findValue = (variants: string[]) => {
-        for (const key of variants) {
-          if (row[key] !== undefined && row[key] !== null && row[key] !== '') {
-            return row[key];
-          }
+  const [isLoading, setIsLoading] = useState(true);
+  const { confirm, showSuccess, showError } = useConfirmDialog();
+
+  const fetchData = async () => {
+    setIsLoading(true);
+    try {
+      const { data: records, error: recordsError } = await supabase
+        .from('rrhh')
+        .select('*')
+        .order('fecha', { ascending: false });
+
+      if (recordsError) throw recordsError;
+
+      const { data: logs, error: logsError } = await supabase
+        .from('upload_logs')
+        .select('*')
+        .eq('dimension', 'RRHH')
+        .order('created_at', { ascending: false });
+
+      if (logsError) throw logsError;
+
+      const formattedRecords: HRRecord[] = (records || []).map((r: any) => ({
+        id: r.id,
+        fecha: r.fecha,
+        id_emp: r.id_emp,
+        empleado: r.empleado,
+        puesto: r.puesto,
+        incidencia: r.incidencia,
+        horas_extra: Number(r.horas_extra),
+        monto_extra: Number(r.monto_extra),
+        fileId: r.upload_id,
+        fecha_registro: r.created_at
+      }));
+
+      setAllRecords(formattedRecords);
+
+      // Transform logs
+      const formattedLogs: ProcessedFile[] = (logs || []).map((l: any) => {
+        const fileRecords = formattedRecords.filter(r => r.fileId === l.id);
+        
+        // Calculate metrics from records
+        let periodoInicio = 'N/A';
+        let periodoFin = 'N/A';
+        let totalProcesado = 0;
+
+        if (fileRecords.length > 0) {
+          // Sort by date to find start/end
+          const sortedDates = [...fileRecords].sort((a, b) => new Date(a.fecha).getTime() - new Date(b.fecha).getTime());
+          periodoInicio = sortedDates[0].fecha;
+          periodoFin = sortedDates[sortedDates.length - 1].fecha;
+          
+          // Sum total extra cost
+          totalProcesado = fileRecords.reduce((sum, r) => sum + r.monto_extra, 0);
         }
-        return null;
-      };
 
-      // Mapeo basado en el esquema del usuario (Asistencia/Nómina):
-      // ['Fecha Registro', 'ID Emp', 'Empleado', 'Puesto', 'Incidencia', 'Horas Extra', 'Monto Extra']
-      const fecha = findValue(['Fecha Registro', 'Fecha', 'date', 'Date']) || new Date().toISOString().split('T')[0];
-      const id_emp = findValue(['ID Emp', 'id_emp', 'ID', 'id']) || `EMP-${index + 1}`;
-      const empleado = findValue(['Empleado', 'empleado', 'nombre', 'Nombre']) || `Empleado ${index + 1}`;
-      const puesto = findValue(['Puesto', 'puesto', 'cargo', 'Cargo']) || 'Sin puesto';
-      const incidencia = findValue(['Incidencia', 'incidencia', 'tipo', 'Tipo']) || 'Asistencia';
-      const horas_extra = parseFloat(findValue(['Horas Extra', 'horas_extra', 'horas', 'Horas']) || 0);
-      const monto_extra = parseFloat(findValue(['Monto Extra', 'monto_extra', 'monto', 'Monto']) || 0);
+        return {
+          id: l.id,
+          fileName: l.filename,
+          periodoInicio,
+          periodoFin,
+          fechaCarga: l.created_at,
+          totalProcesado,
+          totalRegistros: l.total_rows,
+          status: l.status === 'success' ? 'integrado' : 'error',
+          records: fileRecords
+        };
+      });
 
-      return {
-        id: `hr-${Date.now()}-${index}`,
-        fecha,
-        id_emp,
-        empleado,
-        puesto,
-        incidencia,
-        horas_extra,
-        monto_extra,
-        fecha_registro: new Date().toISOString(),
-        fileId,
-      };
-    });
+      setProcessedFiles(formattedLogs);
 
-    console.log('Registros procesados:', newRecords);
-    setAllRecords([...allRecords, ...newRecords]);
+    } catch (error) {
+      console.error('Error fetching data:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
-    // Extraer periodo de los datos
-    const fechas = newRecords.map(r => r.fecha).sort();
-    const periodoInicio = fechas.length > 0 ? fechas[0] : 'N/A';
-    const periodoFin = fechas.length > 0 ? fechas[fechas.length - 1] : 'N/A';
-    
-    // Calcular total procesado (suma de monto extra)
-    const totalProcesado = newRecords.reduce((sum, r) => sum + r.monto_extra, 0);
+  useEffect(() => {
+    fetchData();
+  }, []);
 
-    const newFile: ProcessedFile = {
-      id: fileId,
-      fileName: fileName || `RRHH_Archivo_${new Date().toLocaleDateString('es-MX').replace(/\//g, '-')}.xlsx`,
-      periodoInicio,
-      periodoFin,
-      fechaCarga: new Date().toISOString(),
-      totalProcesado,
-      totalRegistros: newRecords.length,
-      status: 'integrado',
-      records: newRecords,
-    };
-
-    setProcessedFiles([newFile, ...processedFiles]);
+  const handleDataParsed = (data: any[], fileName?: string) => {
+    fetchData();
     setShowUploader(false);
   };
 
@@ -131,16 +154,50 @@ export default function RRHHView() {
     console.log('Editar registro:', row);
   };
 
-  const handleDelete = (row: HRRecord) => {
-    setAllRecords(allRecords.filter(r => r.id !== row.id));
+  const handleDelete = async (row: HRRecord) => {
+    if (!row.id) return;
+    
+    const confirmed = await confirm(`¿Eliminar registro de ${row.empleado}?`);
+    if (!confirmed) return;
+
+    try {
+      const { error } = await supabase
+        .from('rrhh')
+        .delete()
+        .eq('id', row.id);
+
+      if (error) throw error;
+
+      setAllRecords(allRecords.filter(r => r.id !== row.id));
+      showSuccess('Registro eliminado exitosamente');
+    } catch (error) {
+      console.error('Error deleting record:', error);
+      showError('Error al eliminar el registro');
+    }
   };
 
   const handleCreate = () => {
     setShowUploader(true);
   };
 
+  // Calcular rango de fechas dinámico
+  const dateRange = allRecords.length > 0 ? (() => {
+    const dates = allRecords.map(r => new Date(r.fecha));
+    const minDate = new Date(Math.min(...dates.map(d => d.getTime())));
+    const maxDate = new Date(Math.max(...dates.map(d => d.getTime())));
+    
+    const formatDate = (date: Date) => date.toLocaleDateString('es-MX', { day: 'numeric', month: 'short' });
+    const formatMonth = (date: Date) => date.toLocaleDateString('es-MX', { month: 'long', year: 'numeric' });
+    
+    if (minDate.getMonth() === maxDate.getMonth() && minDate.getFullYear() === maxDate.getFullYear()) {
+      return { text: formatMonth(minDate), isSameMonth: true };
+    }
+    return { text: `${formatDate(minDate)} - ${formatDate(maxDate)}`, isSameMonth: false };
+  })() : { text: 'Sin datos', isSameMonth: false };
+
   // Calcular métricas
   const totalIncidencias = allRecords.filter(r => r.incidencia !== 'Asistencia').length;
+  const totalRegistros = allRecords.length;
   const totalHorasExtra = allRecords.reduce((sum, r) => sum + r.horas_extra, 0);
   const costoHorasExtra = allRecords.reduce((sum, r) => sum + r.monto_extra, 0);
   const empleadosUnicos = new Set(allRecords.map(r => r.id_emp)).size;
@@ -161,8 +218,8 @@ export default function RRHHView() {
       }
       return acc;
     }, [])
-    .sort((a: any, b: any) => b.monto - a.monto) // Ordenar por mayor monto
-    .slice(0, 7); // Top 7 empleados con más costo extra
+    .sort((a: any, b: any) => b.monto - a.monto)
+    .slice(0, 7);
 
   const chartDataByIncidencia = allRecords.reduce((acc: any[], record) => {
     const existing = acc.find(item => item.name === record.incidencia);
@@ -176,6 +233,28 @@ export default function RRHHView() {
     }
     return acc;
   }, []);
+
+  // Top empleados con más incidencias (faltas/retardos)
+  const chartDataByEmployeeIncidents = allRecords
+    .filter(r => r.incidencia !== 'Asistencia')
+    .reduce((acc: any[], record) => {
+      const existing = acc.find(item => item.name === record.empleado);
+      if (existing) {
+        existing.incidencias += 1;
+        existing.faltas += record.incidencia === 'Falta' ? 1 : 0;
+        existing.retardos += record.incidencia === 'Retardo' ? 1 : 0;
+      } else {
+        acc.push({
+          name: record.empleado,
+          incidencias: 1,
+          faltas: record.incidencia === 'Falta' ? 1 : 0,
+          retardos: record.incidencia === 'Retardo' ? 1 : 0,
+        });
+      }
+      return acc;
+    }, [])
+    .sort((a: any, b: any) => b.incidencias - a.incidencias)
+    .slice(0, 7);
 
   const columns = [
     { key: 'fecha' as keyof HRRecord, label: 'Fecha' },
@@ -264,7 +343,7 @@ export default function RRHHView() {
             <p className="text-3xl font-bold text-white mb-2">{empleadosUnicos}</p>
             <div className="flex items-center gap-1 text-xs text-white/80 font-medium">
               <UserCheck className="w-3 h-3" />
-              <span>En reporte actual</span>
+              <span>Periodo: {dateRange.text}</span>
             </div>
           </CardContent>
         </Card>
@@ -281,7 +360,7 @@ export default function RRHHView() {
             <p className="text-3xl font-bold text-white mb-2">{totalHorasExtra}h</p>
             <div className="flex items-center gap-1 text-xs text-white/80 font-medium">
               <Activity className="w-3 h-3" />
-              <span>Acumuladas</span>
+              <span>Periodo: {dateRange.text}</span>
             </div>
           </CardContent>
         </Card>
@@ -298,7 +377,7 @@ export default function RRHHView() {
             <p className="text-3xl font-bold text-white mb-2">${costoHorasExtra.toLocaleString()}</p>
             <div className="flex items-center gap-1 text-xs text-white/80 font-medium">
               <TrendingUp className="w-3 h-3" />
-              <span>Pago adicional</span>
+              <span>{totalHorasExtra}h • {dateRange.text}</span>
             </div>
           </CardContent>
         </Card>
@@ -314,7 +393,7 @@ export default function RRHHView() {
             </div>
             <p className="text-3xl font-bold text-white mb-2">{totalIncidencias}</p>
             <div className="flex items-center gap-1 text-xs text-white/80 font-medium">
-              <span>Registros atípicos</span>
+              <span>Faltas + Retardos • {dateRange.text}</span>
             </div>
           </CardContent>
         </Card>
@@ -332,26 +411,123 @@ export default function RRHHView() {
         <TabsContent value="overview" className="space-y-6">
           <div className="grid grid-cols-3 gap-6">
             <div className="col-span-2">
-              <DynamicChart
-                data={chartDataByEmployee}
-                type="bar"
-                title="Top Costo Nómina Extra"
-                description="Empleados con mayor pago por horas extra"
-                xKey="value"
-                yKey="monto"
-                nameKey="name"
-              />
+              <Card className="h-full border border-gray-200 bg-white shadow-sm hover:shadow-md transition-shadow">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-lg font-semibold text-gray-800">Top Costo Nómina Extra</CardTitle>
+                  <CardDescription className="text-sm text-gray-500">Empleados con mayor pago por horas extra</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="h-[300px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart
+                        data={chartDataByEmployee}
+                        layout="vertical"
+                        margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" horizontal={true} vertical={false} stroke="#e2e8f0" />
+                        <XAxis type="number" hide />
+                        <YAxis 
+                          dataKey="name" 
+                          type="category" 
+                          width={120}
+                          tick={{ fill: '#64748b', fontSize: 11 }}
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <Tooltip 
+                          cursor={{ fill: '#f1f5f9' }}
+                          contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                          formatter={(value: number) => [`$${value.toLocaleString()}`, 'Monto Extra']}
+                        />
+                        <Bar dataKey="monto" fill="#8b5cf6" radius={[0, 4, 4, 0]} barSize={24} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </CardContent>
+              </Card>
             </div>
             <div>
-              <DynamicChart
-                data={chartDataByIncidencia}
-                type="bar"
-                title="Frecuencia de Incidencias"
-                description="Distribución por tipo de evento"
-                xKey="name"
-                yKey="value"
-              />
+              <Card className="h-full border border-gray-200 bg-white shadow-sm hover:shadow-md transition-shadow">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-lg font-semibold text-gray-800">Frecuencia de Incidencias</CardTitle>
+                  <CardDescription className="text-sm text-gray-500">Distribución por tipo de evento</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="h-[300px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart
+                        data={chartDataByIncidencia}
+                        margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                        <XAxis 
+                          dataKey="name" 
+                          tick={{ fill: '#64748b', fontSize: 11 }}
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <YAxis 
+                          tick={{ fill: '#64748b', fontSize: 11 }}
+                          axisLine={false}
+                          tickLine={false}
+                          allowDecimals={false}
+                        />
+                        <Tooltip 
+                          cursor={{ fill: '#f1f5f9' }}
+                          contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                          formatter={(value: number) => [value, 'Cantidad']}
+                        />
+                        <Bar dataKey="value" fill="#ec4899" radius={[4, 4, 0, 0]} barSize={32} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </CardContent>
+              </Card>
             </div>
+          </div>
+
+          {/* Nueva fila: Top Empleados con Más Incidencias */}
+          <div className="grid grid-cols-1 gap-6">
+            <Card className="border border-gray-200 bg-white shadow-sm hover:shadow-md transition-shadow">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-lg font-semibold text-gray-800">Top Empleados con Más Incidencias</CardTitle>
+                <CardDescription className="text-sm text-gray-500">
+                  Problemas de asistencia/puntualidad • <span className="font-mono text-xs">Acción correctiva requerida</span>
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="h-[280px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart
+                      data={chartDataByEmployeeIncidents}
+                      layout="vertical"
+                      margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" horizontal={true} vertical={false} stroke="#e2e8f0" />
+                      <XAxis type="number" hide />
+                      <YAxis 
+                        dataKey="name" 
+                        type="category" 
+                        width={120}
+                        tick={{ fill: '#64748b', fontSize: 11 }}
+                        axisLine={false}
+                        tickLine={false}
+                      />
+                      <Tooltip 
+                        cursor={{ fill: '#f1f5f9' }}
+                        contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                        formatter={(value: number, name: string, props: any) => [
+                          `${value} incidencias (${props.payload.faltas} faltas, ${props.payload.retardos} retardos)`,
+                          'Total'
+                        ]}
+                        labelFormatter={(label) => `Empleado: ${label}`}
+                      />
+                      <Bar dataKey="incidencias" fill="#ef4444" radius={[0, 4, 4, 0]} barSize={24} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </CardContent>
+            </Card>
           </div>
         </TabsContent>
 
@@ -444,26 +620,38 @@ export default function RRHHView() {
                               </span>
                             </td>
                             <td className="p-3">
-                              <div className="flex items-center justify-center gap-2">
+                              <div className="flex items-center gap-2">
                                 <Button
                                   variant="ghost"
                                   size="sm"
-                                  className="gap-1.5 hover:bg-blue-50 hover:text-blue-700"
+                                  className="text-blue-600 hover:text-blue-800 hover:bg-blue-50"
                                   onClick={() => setSelectedFile(file)}
-                                  title="Inspeccionar datos crudos de este archivo"
                                 >
                                   <Eye className="w-4 h-4" />
-                                  Ver Detalle
                                 </Button>
                                 <Button
                                   variant="ghost"
                                   size="sm"
-                                  className="hover:bg-red-50 hover:text-red-700"
-                                  onClick={() => {
-                                    setProcessedFiles(processedFiles.filter(f => f.id !== file.id));
-                                    setAllRecords(allRecords.filter(r => r.fileId !== file.id));
+                                  className="text-red-600 hover:text-red-800 hover:bg-red-50"
+                                  onClick={async () => {
+                                    const confirmed = await confirm('¿Eliminar este archivo y todos sus registros?');
+                                    if (confirmed) {
+                                      try {
+                                        const { error } = await supabase
+                                          .from('upload_logs')
+                                          .delete()
+                                          .eq('id', file.id);
+                                        
+                                        if (error) throw error;
+                                        
+                                        await fetchData();
+                                        showSuccess('Archivo eliminado correctamente');
+                                      } catch (err) {
+                                        console.error('Error deleting file:', err);
+                                        showError('Error al eliminar el archivo');
+                                      }
+                                    }
                                   }}
-                                  title="Eliminar archivo del warehouse"
                                 >
                                   <Trash2 className="w-4 h-4" />
                                 </Button>

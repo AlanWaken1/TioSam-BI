@@ -1,7 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
+import { supabase } from '@/lib/supabase';
+import { useConfirmDialog } from '@/hooks/useConfirmDialog';
 import { 
   Upload, 
   Sparkles,
@@ -27,6 +29,7 @@ import { FileUploader } from '../components/dashboard/FileUploader';
 import { DataTable } from '../components/dashboard/DataTable';
 import { AIAnalystCard } from '../components/dashboard/AIAnalystCard';
 import { DynamicChart } from '../components/dashboard/DynamicChart';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 interface LogisticsRecord {
   id?: string;
@@ -60,7 +63,88 @@ export default function LogisticaView() {
   const [processedFiles, setProcessedFiles] = useState<ProcessedFile[]>([]);
   const [showUploader, setShowUploader] = useState(false);
   const [selectedFile, setSelectedFile] = useState<ProcessedFile | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const { confirm, showSuccess, showError } = useConfirmDialog();
 
+  const fetchData = async () => {
+    setIsLoading(true);
+    try {
+      const { data: records, error: recordsError } = await supabase
+        .from('logistica')
+        .select('*')
+        .order('fecha_salida', { ascending: false });
+
+      if (recordsError) throw recordsError;
+
+      const { data: logs, error: logsError } = await supabase
+        .from('upload_logs')
+        .select('*')
+        .eq('dimension', 'Logística')
+        .order('created_at', { ascending: false });
+
+      if (logsError) throw logsError;
+
+      const formattedRecords: LogisticsRecord[] = (records || []).map((r: any) => ({
+        id: r.id,
+        fecha_salida: r.fecha_salida,
+        ruta_destino: r.ruta_destino,
+        chofer_asignado: r.chofer_asignado,
+        unidad: r.unidad,
+        pz_cargadas: Number(r.pz_cargadas),
+        pz_devueltas: Number(r.pz_devueltas),
+        porcentaje_devolucion: Number(r.pz_cargadas) > 0 ? (Number(r.pz_devueltas) / Number(r.pz_cargadas)) * 100 : 0,
+        gasto_gasolina: Number(r.gasto_gasolina),
+        status: r.status ? r.status.toLowerCase() : 'a_tiempo', // Default to 'a_tiempo' if null
+        fileId: r.upload_id,
+        fecha_registro: r.created_at
+      }));
+
+      setAllRecords(formattedRecords);
+
+      // Transform logs
+      const formattedLogs: ProcessedFile[] = (logs || []).map((l: any) => {
+        const fileRecords = formattedRecords.filter(r => r.fileId === l.id);
+        
+        // Calculate metrics from records
+        let periodoInicio = 'N/A';
+        let periodoFin = 'N/A';
+        let totalProcesado = 0;
+
+        if (fileRecords.length > 0) {
+          // Sort by date to find start/end
+          const sortedDates = [...fileRecords].sort((a, b) => new Date(a.fecha_salida).getTime() - new Date(b.fecha_salida).getTime());
+          periodoInicio = sortedDates[0].fecha_salida;
+          periodoFin = sortedDates[sortedDates.length - 1].fecha_salida;
+          
+          // Sum total pieces distributed (loaded - returned)
+          totalProcesado = fileRecords.reduce((sum, r) => sum + (r.pz_cargadas - r.pz_devueltas), 0);
+        }
+
+        return {
+          id: l.id,
+          fileName: l.filename,
+          periodoInicio,
+          periodoFin,
+          fechaCarga: l.created_at,
+          totalProcesado,
+          totalRegistros: l.total_rows,
+          status: l.status === 'success' ? 'integrado' : 'error',
+          records: fileRecords
+        };
+      });
+
+      setProcessedFiles(formattedLogs);
+
+    } catch (error) {
+      console.error('Error fetching data:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchData();
+  }, []);
   const handleDataParsed = (data: any[], fileName?: string) => {
     console.log('Datos CSV parseados:', data);
     
@@ -147,6 +231,9 @@ export default function LogisticaView() {
     };
 
     setProcessedFiles([newFile, ...processedFiles]);
+    
+    // After data is parsed and potentially uploaded to Supabase, refetch all data
+    fetchData();
     setShowUploader(false);
   };
 
@@ -154,13 +241,48 @@ export default function LogisticaView() {
     console.log('Editar registro:', row);
   };
 
-  const handleDelete = (row: LogisticsRecord) => {
-    setAllRecords(allRecords.filter(r => r.id !== row.id));
+  const handleDelete = async (row: LogisticsRecord) => {
+    if (!row.id) return;
+    
+    const confirmed = await confirm(`¿Eliminar ruta ${row.ruta_destino}?`);
+    if (!confirmed) return;
+
+    try {
+      const { error } = await supabase
+        .from('logistica')
+        .delete()
+        .eq('id', row.id);
+
+      if (error) throw error;
+
+      setAllRecords(allRecords.filter(r => r.id !== row.id));
+      showSuccess('Registro eliminado exitosamente');
+    } catch (error) {
+      console.error('Error deleting record:', error);
+      showError('Error al eliminar el registro');
+    }
   };
 
   const handleCreate = () => {
     setShowUploader(true);
   };
+
+  // Calcular rango de fechas dinámico
+  const dateRange = allRecords.length > 0 ? (() => {
+    const dates = allRecords.map(r => new Date(r.fecha_salida));
+    const minDate = new Date(Math.min(...dates.map(d => d.getTime())));
+    const maxDate = new Date(Math.max(...dates.map(d => d.getTime())));
+    
+    const formatDate = (date: Date) => date.toLocaleDateString('es-MX', { day: 'numeric', month: 'short' });
+    const formatMonth = (date: Date) => date.toLocaleDateString('es-MX', { month: 'long', year: 'numeric' });
+    
+    // Si es el mismo mes, mostrar solo el mes
+    if (minDate.getMonth() === maxDate.getMonth() && minDate.getFullYear() === maxDate.getFullYear()) {
+      return { text: formatMonth(minDate), isSameMonth: true };
+    }
+    // Si son fechas diferentes, mostrar rango
+    return { text: `${formatDate(minDate)} - ${formatDate(maxDate)}`, isSameMonth: false };
+  })() : { text: 'Sin datos', isSameMonth: false };
 
   // Calcular métricas
   const totalPiezasDistribuidas = allRecords.reduce((sum, r) => sum + (r.pz_cargadas - r.pz_devueltas), 0);
@@ -175,11 +297,11 @@ export default function LogisticaView() {
   const chartDataByRoute = allRecords
     .map(record => ({
       name: record.ruta_destino,
-      tasa_devolucion: record.pz_cargadas > 0 ? (record.pz_devueltas / record.pz_cargadas) * 100 : 0,
+      value: record.pz_cargadas > 0 ? (record.pz_devueltas / record.pz_cargadas) * 100 : 0,
       cargado: record.pz_cargadas
     }))
-    .sort((a, b) => b.tasa_devolucion - a.tasa_devolucion) // Ordenar por mayor tasa de devolución
-    .slice(0, 7); // Top 7 rutas con más problemas
+    .sort((a, b) => b.value - a.value)
+    .slice(0, 7);
 
   const chartDataGastos = allRecords
     .map(record => ({
@@ -187,6 +309,21 @@ export default function LogisticaView() {
       value: record.gasto_gasolina
     }))
     .sort((a, b) => b.value - a.value)
+    .slice(0, 7);
+
+  // Nueva gráfica: Eficiencia por Ruta (Costo por Pieza Entregada)
+  const chartDataEficiencia = allRecords
+    .map(record => {
+      const piezasEntregadas = record.pz_cargadas - record.pz_devueltas;
+      const costoPorPieza = piezasEntregadas > 0 ? record.gasto_gasolina / piezasEntregadas : 0;
+      return {
+        name: record.ruta_destino,
+        value: costoPorPieza,
+        piezas: piezasEntregadas
+      };
+    })
+    .filter(r => r.piezas > 0) // Solo rutas con entregas
+    .sort((a, b) => a.value - b.value) // Ordenar por MENOR costo (más eficiente)
     .slice(0, 7);
 
   const columns = [
@@ -277,7 +414,7 @@ export default function LogisticaView() {
           <div className="absolute top-0 right-0 w-24 h-24 bg-white/10 rounded-full -mr-12 -mt-12" />
           <CardContent className="p-6 relative">
             <div className="flex items-center justify-between mb-3">
-              <p className="text-sm text-white/90 font-medium">Piezas Distribuidas</p>
+              <p className="text-sm text-white/90 font-medium">Piezas Entregadas Netas</p>
               <div className="w-10 h-10 bg-white/20 backdrop-blur-sm rounded-xl flex items-center justify-center">
                 <Package className="w-5 h-5 text-white" />
               </div>
@@ -285,7 +422,7 @@ export default function LogisticaView() {
             <p className="text-3xl font-bold text-white mb-2">{totalPiezasDistribuidas.toLocaleString()} pz</p>
             <div className="flex items-center gap-1 text-xs text-white/80 font-medium">
               <TrendingUp className="w-3 h-3" />
-              <span>Esta semana</span>
+              <span>Periodo: {dateRange.text}</span>
             </div>
           </CardContent>
         </Card>
@@ -338,9 +475,7 @@ export default function LogisticaView() {
             </div>
             <p className="text-3xl font-bold text-white mb-2">${totalGastoCombustible.toLocaleString()}</p>
             <div className="flex items-center gap-1 text-xs text-white/80 font-medium">
-              <span>
-                {totalGastoCombustible > 0 ? `${((totalGastoCombustible / totalGastoCombustible) * 100).toFixed(0)}% del presupuesto` : 'Sin datos'}
-              </span>
+              <span>Periodo: {dateRange.text}</span>
             </div>
           </CardContent>
         </Card>
@@ -358,7 +493,7 @@ export default function LogisticaView() {
             <p className="text-3xl font-bold text-white mb-2">{efectividadEntregas.toFixed(0)}%</p>
             <div className="flex items-center gap-1 text-xs text-white/80 font-medium">
               <Navigation className="w-3 h-3" />
-              <span>{rutasATiempo} rutas a tiempo</span>
+              <span>{rutasATiempo} de {allRecords.length} rutas a tiempo</span>
             </div>
           </CardContent>
         </Card>
@@ -374,32 +509,126 @@ export default function LogisticaView() {
 
         {/* Tab: Tablero de Indicadores */}
         <TabsContent value="overview" className="space-y-6">
+          {/* Primera fila: 2 gráficas */}
           <div className="grid grid-cols-3 gap-6">
             {/* Gráfico Principal: Carga vs. Devolución */}
             <div className="col-span-2">
-              <DynamicChart
-                data={chartDataByRoute}
-                type="bar"
-                title="Top Rutas con Mayor Devolución (%)"
-                description="Rutas con mayor índice de rechazo/merma"
-                xKey="tasa_devolucion"
-                yKey="name"
-                nameKey="name"
-              />
+              <Card className="h-full border border-gray-200 bg-white shadow-sm hover:shadow-md transition-shadow">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-lg font-semibold text-gray-800">Top Rutas con Mayor Devolución (%)</CardTitle>
+                  <CardDescription className="text-sm text-gray-500">Rutas con mayor índice de rechazo/merma</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="h-[300px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart
+                        data={chartDataByRoute}
+                        layout="vertical"
+                        margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" horizontal={true} vertical={false} stroke="#e2e8f0" />
+                        <XAxis type="number" hide />
+                        <YAxis 
+                          dataKey="name" 
+                          type="category" 
+                          width={100}
+                          tick={{ fill: '#64748b', fontSize: 11 }}
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <Tooltip 
+                          cursor={{ fill: '#f1f5f9' }}
+                          contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                          formatter={(value: number) => [`${value.toFixed(1)}%`, 'Tasa Devolución']}
+                        />
+                        <Bar dataKey="value" fill="#ef4444" radius={[0, 4, 4, 0]} barSize={24} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </CardContent>
+              </Card>
             </div>
 
             {/* Gráfico Secundario: Distribución de Gastos */}
             <div>
-              <DynamicChart
-                data={chartDataGastos}
-                type="bar"
-                title="Gasto Combustible por Ruta"
-                description="Top rutas más costosas"
-                xKey="value"
-                yKey="name"
-                nameKey="name"
-              />
+              <Card className="h-full border border-gray-200 bg-white shadow-sm hover:shadow-md transition-shadow">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-lg font-semibold text-gray-800">Gasto Combustible</CardTitle>
+                  <CardDescription className="text-sm text-gray-500">Top rutas más costosas</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="h-[300px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart
+                        data={chartDataGastos}
+                        layout="vertical"
+                        margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" horizontal={true} vertical={false} stroke="#e2e8f0" />
+                        <XAxis type="number" hide />
+                        <YAxis 
+                          dataKey="name" 
+                          type="category" 
+                          width={80}
+                          tick={{ fill: '#64748b', fontSize: 11 }}
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <Tooltip 
+                          cursor={{ fill: '#f1f5f9' }}
+                          contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                          formatter={(value: number) => [`$${value.toLocaleString()}`, 'Gasto']}
+                        />
+                        <Bar dataKey="value" fill="#f59e0b" radius={[0, 4, 4, 0]} barSize={24} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </CardContent>
+              </Card>
             </div>
+          </div>
+
+          {/* Segunda fila: Nueva gráfica de eficiencia */}
+          <div className="grid grid-cols-1 gap-6">
+            <Card className="border border-gray-200 bg-white shadow-sm hover:shadow-md transition-shadow">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-lg font-semibold text-gray-800">Eficiencia por Ruta (Costo/Pieza)</CardTitle>
+                <CardDescription className="text-sm text-gray-500">
+                  Rutas más eficientes • <span className="font-mono text-xs">Cálculo: Gasto Combustible ÷ Piezas Entregadas Netas</span>
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="h-[280px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart
+                      data={chartDataEficiencia}
+                      layout="vertical"
+                      margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" horizontal={true} vertical={false} stroke="#e2e8f0" />
+                      <XAxis type="number" hide />
+                      <YAxis 
+                        dataKey="name" 
+                        type="category" 
+                        width={100}
+                        tick={{ fill: '#64748b', fontSize: 11 }}
+                        axisLine={false}
+                        tickLine={false}
+                      />
+                      <Tooltip 
+                        cursor={{ fill: '#f1f5f9' }}
+                        contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                        formatter={(value: number, name: string, props: any) => [
+                          `$${value.toFixed(2)} por pieza (${props.payload.piezas} pz entregadas)`,
+                          'Eficiencia'
+                        ]}
+                      />
+                      <Bar dataKey="value" fill="#10b981" radius={[0, 4, 4, 0]} barSize={24} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </CardContent>
+            </Card>
           </div>
 
           {/* Alerta Visual si hay problemas de devolución */}
@@ -512,26 +741,43 @@ export default function LogisticaView() {
                               </span>
                             </td>
                             <td className="p-3">
-                              <div className="flex items-center justify-center gap-2">
+                              <div className="flex items-center gap-2">
                                 <Button
                                   variant="ghost"
                                   size="sm"
-                                  className="gap-1.5 hover:bg-blue-50 hover:text-blue-700"
+                                  className="text-blue-600 hover:text-blue-800 hover:bg-blue-50"
                                   onClick={() => setSelectedFile(file)}
-                                  title="Inspeccionar hoja de ruta específica"
                                 >
                                   <Eye className="w-4 h-4" />
-                                  Ver Detalle
                                 </Button>
                                 <Button
                                   variant="ghost"
                                   size="sm"
-                                  className="hover:bg-red-50 hover:text-red-700"
-                                  onClick={() => {
-                                    setProcessedFiles(processedFiles.filter(f => f.id !== file.id));
-                                    setAllRecords(allRecords.filter(r => r.fileId !== file.id));
+                                  className="text-red-600 hover:text-red-800 hover:bg-red-50"
+                                  onClick={async () => {
+                                    console.log('Attempting to delete file:', file.id);
+                                    const confirmed = await confirm('¿Eliminar este archivo y todos sus registros?');
+                                    if (confirmed) {
+                                      try {
+                                        const { error } = await supabase
+                                          .from('upload_logs')
+                                          .delete()
+                                          .eq('id', file.id);
+                                        
+                                        if (error) {
+                                          console.error('Supabase delete error:', error);
+                                          throw error;
+                                        }
+                                        
+                                        console.log('File deleted successfully');
+                                        await fetchData();
+                                        showSuccess('Archivo eliminado correctamente');
+                                      } catch (err) {
+                                        console.error('Error deleting file:', err);
+                                        showError('Error al eliminar el archivo');
+                                      }
+                                    }
                                   }}
-                                  title="Eliminar reporte del warehouse"
                                 >
                                   <Trash2 className="w-4 h-4" />
                                 </Button>

@@ -1,7 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
+import { supabase } from '@/lib/supabase';
+import { useConfirmDialog } from '@/hooks/useConfirmDialog';
 import { 
   Upload, 
   Sparkles,
@@ -28,6 +30,7 @@ import { FileUploader } from '../components/dashboard/FileUploader';
 import { DataTable } from '../components/dashboard/DataTable';
 import { AIAnalystCard } from '../components/dashboard/AIAnalystCard';
 import { DynamicChart } from '../components/dashboard/DynamicChart';
+import { ComposedChart, BarChart, Bar, LineChart, Line, Area, AreaChart, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 interface FinanceRecord {
   id?: string;
@@ -60,70 +63,93 @@ export default function FinanzasView() {
   const [showUploader, setShowUploader] = useState(false);
   const [selectedFile, setSelectedFile] = useState<ProcessedFile | null>(null);
 
-  const handleDataParsed = (data: any[], fileName?: string) => {
-    console.log('Datos CSV parseados:', data);
-    
-    const fileId = `file-${Date.now()}`;
-    
-    const newRecords: FinanceRecord[] = data.map((row, index) => {
-      const findValue = (variants: string[]) => {
-        for (const key of variants) {
-          if (row[key] !== undefined && row[key] !== null && row[key] !== '') {
-            return row[key];
-          }
+  const [isLoading, setIsLoading] = useState(true);
+  const { confirm, showSuccess, showError } = useConfirmDialog();
+
+  const fetchData = async () => {
+    setIsLoading(true);
+    try {
+      // 1. Fetch Data Records
+      const { data: records, error: recordsError } = await supabase
+        .from('finanzas')
+        .select('*')
+        .order('fecha', { ascending: false });
+
+      if (recordsError) throw recordsError;
+
+      // 2. Fetch Upload Logs
+      const { data: logs, error: logsError } = await supabase
+        .from('upload_logs')
+        .select('*')
+        .eq('dimension', 'Finanzas')
+        .order('created_at', { ascending: false });
+
+      if (logsError) throw logsError;
+
+      // Transform records to match interface
+      const formattedRecords: FinanceRecord[] = (records || []).map((r: any) => ({
+        id: r.id,
+        fecha: r.fecha,
+        folio: r.folio,
+        tipo: r.tipo,
+        categoria: r.categoria,
+        concepto: r.concepto,
+        monto: Number(r.monto),
+        metodo_pago: r.metodo_pago,
+        fileId: r.upload_id,
+        fecha_registro: r.created_at // Assuming created_at exists or we use upload log date
+      }));
+
+      setAllRecords(formattedRecords);
+
+      // Transform logs
+      const formattedLogs: ProcessedFile[] = (logs || []).map((l: any) => {
+        const fileRecords = formattedRecords.filter(r => r.fileId === l.id);
+        
+        // Calculate metrics from records
+        let periodoInicio = 'N/A';
+        let periodoFin = 'N/A';
+        let totalProcesado = 0;
+
+        if (fileRecords.length > 0) {
+          // Sort by date to find start/end
+          const sortedDates = [...fileRecords].sort((a, b) => new Date(a.fecha).getTime() - new Date(b.fecha).getTime());
+          periodoInicio = sortedDates[0].fecha;
+          periodoFin = sortedDates[sortedDates.length - 1].fecha;
+          
+          // Sum amounts
+          totalProcesado = fileRecords.reduce((sum, r) => sum + Math.abs(r.monto), 0);
         }
-        return null;
-      };
 
-      // Mapeo basado en el esquema del usuario:
-      // ['Fecha', 'Folio', 'Tipo', 'Categoría', 'Concepto', 'Monto', 'Método Pago']
-      const fecha = findValue(['fecha', 'Fecha', 'date', 'Date', 'FECHA']) || new Date().toISOString().split('T')[0];
-      const folio = findValue(['folio', 'Folio', 'id', 'ID', 'FOLIO']) || `F-${index + 1}`;
-      const tipoRaw = findValue(['tipo', 'Tipo', 'type', 'Type', 'TIPO', 'Movimiento', 'movimiento']) || 'Ingreso';
-      const tipo = tipoRaw.toString().toLowerCase().includes('gasto') || tipoRaw.toString().toLowerCase().includes('egreso') ? 'Gasto' : 'Ingreso';
-      const categoria = findValue(['categoria', 'Categoría', 'Categoria', 'category', 'Category', 'CATEGORIA', 'Rubro', 'rubro']) || 'General';
-      const concepto = findValue(['concepto', 'Concepto', 'concept', 'Concept', 'descripcion', 'Descripción', 'Descripcion', 'CONCEPTO']) || 'Sin concepto';
-      const monto = parseFloat(findValue(['monto', 'Monto', 'amount', 'Amount', 'MONTO', 'Importe', 'importe']) || 0);
-      const metodo_pago = findValue(['metodo_pago', 'Método Pago', 'Metodo Pago', 'Metodo de Pago', 'payment_method', 'Forma de Pago']) || 'Efectivo';
+        return {
+          id: l.id,
+          fileName: l.filename,
+          periodoInicio,
+          periodoFin,
+          fechaCarga: l.created_at,
+          totalProcesado,
+          totalRegistros: l.total_rows,
+          status: l.status === 'success' ? 'integrado' : 'error',
+          records: fileRecords
+        };
+      });
 
-      return {
-        id: `fin-${Date.now()}-${index}`,
-        fecha,
-        folio,
-        tipo: tipo as 'Ingreso' | 'Gasto',
-        categoria,
-        concepto,
-        monto,
-        metodo_pago,
-        fecha_registro: new Date().toISOString(),
-        fileId,
-      };
-    });
+      setProcessedFiles(formattedLogs);
 
-    console.log('Registros procesados:', newRecords);
-    setAllRecords([...allRecords, ...newRecords]);
+    } catch (error) {
+      console.error('Error fetching data:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
-    // Extraer periodo de los datos
-    const fechas = newRecords.map(r => r.fecha).sort();
-    const periodoInicio = fechas.length > 0 ? fechas[0] : 'N/A';
-    const periodoFin = fechas.length > 0 ? fechas[fechas.length - 1] : 'N/A';
-    
-    // Calcular total procesado (suma absoluta de montos)
-    const totalProcesado = newRecords.reduce((sum, r) => sum + Math.abs(r.monto), 0);
+  useEffect(() => {
+    fetchData();
+  }, []);
 
-    const newFile: ProcessedFile = {
-      id: fileId,
-      fileName: fileName || `FIN_Archivo_${new Date().toLocaleDateString('es-MX').replace(/\//g, '-')}.xlsx`,
-      periodoInicio,
-      periodoFin,
-      fechaCarga: new Date().toISOString(),
-      totalProcesado,
-      totalRegistros: newRecords.length,
-      status: 'integrado',
-      records: newRecords,
-    };
-
-    setProcessedFiles([newFile, ...processedFiles]);
+  const handleDataParsed = (data: any[], fileName?: string) => {
+    // Trigger refetch after upload
+    fetchData();
     setShowUploader(false);
   };
 
@@ -131,13 +157,46 @@ export default function FinanzasView() {
     console.log('Editar registro:', row);
   };
 
-  const handleDelete = (row: FinanceRecord) => {
-    setAllRecords(allRecords.filter(r => r.id !== row.id));
+  const handleDelete = async (row: FinanceRecord) => {
+    if (!row.id) return;
+    
+    const confirmed = await confirm(`¿Eliminar registro de ${row.concepto}?`);
+    if (!confirmed) return;
+
+    try {
+      const { error } = await supabase
+        .from('finanzas')
+        .delete()
+        .eq('id', row.id);
+
+      if (error) throw error;
+
+      setAllRecords(allRecords.filter(r => r.id !== row.id));
+      showSuccess('Registro eliminado exitosamente');
+    } catch (error) {
+      console.error('Error deleting record:', error);
+      showError('Error al eliminar el registro');
+    }
   };
 
   const handleCreate = () => {
     setShowUploader(true);
   };
+
+  // Calcular rango de fechas dinámico
+  const dateRange = allRecords.length > 0 ? (() => {
+    const dates = allRecords.map(r => new Date(r.fecha));
+    const minDate = new Date(Math.min(...dates.map(d => d.getTime())));
+    const maxDate = new Date(Math.max(...dates.map(d => d.getTime())));
+    
+    const formatDate = (date: Date) => date.toLocaleDateString('es-MX', { day: 'numeric', month: 'short' });
+    const formatMonth = (date: Date) => date.toLocaleDateString('es-MX', { month: 'long', year: 'numeric' });
+    
+    if (minDate.getMonth() === maxDate.getMonth() && minDate.getFullYear() === maxDate.getFullYear()) {
+      return { text: formatMonth(minDate), isSameMonth: true };
+    }
+    return { text: `${formatDate(minDate)} - ${formatDate(maxDate)}`, isSameMonth: false };
+  })() : { text: 'Sin datos', isSameMonth: false };
 
   // Calcular métricas
   const totalIngresos = allRecords
@@ -181,8 +240,20 @@ export default function FinanzasView() {
       }
       return acc;
     }, [])
-    .sort((a: any, b: any) => b.value - a.value) // Ordenar de mayor a menor
-    .slice(0, 7); // Top 7
+    .sort((a: any, b: any) => b.value - a.value)
+    .slice(0, 7);
+
+  // Flujo de efectivo acumulado (balance acumulativo)
+  const chartDataCumulativeFlow = chartDataByDate.reduce((acc: any[], item, index) => {
+    const balanceDia = item.ingresos - item.gastos;
+    const acumulado = index === 0 ? balanceDia : acc[index - 1].acumulado + balanceDia;
+    acc.push({
+      name: item.name,
+      acumulado,
+      balanceDia
+    });
+    return acc;
+  }, []);
 
   const columns = [
     { key: 'fecha' as keyof FinanceRecord, label: 'Fecha' },
@@ -272,7 +343,7 @@ export default function FinanzasView() {
             <p className="text-3xl font-bold text-white mb-2">${totalIngresos.toLocaleString()}</p>
             <div className="flex items-center gap-1 text-xs text-white/80 font-medium">
               <ArrowUpRight className="w-3 h-3" />
-              <span>Entradas registradas</span>
+              <span>Periodo: {dateRange.text}</span>
             </div>
           </CardContent>
         </Card>
@@ -289,7 +360,7 @@ export default function FinanzasView() {
             <p className="text-3xl font-bold text-white mb-2">${totalGastos.toLocaleString()}</p>
             <div className="flex items-center gap-1 text-xs text-white/80 font-medium">
               <ArrowDownRight className="w-3 h-3" />
-              <span>Salidas registradas</span>
+              <span>Periodo: {dateRange.text}</span>
             </div>
           </CardContent>
         </Card>
@@ -305,7 +376,7 @@ export default function FinanzasView() {
             </div>
             <p className="text-3xl font-bold text-white mb-2">${balance.toLocaleString()}</p>
             <div className="flex items-center gap-1 text-xs text-white/80 font-medium">
-              <span>Ingresos - Gastos</span>
+              <span>{allRecords.filter(r => r.tipo === 'Ingreso').length} ingresos - {allRecords.filter(r => r.tipo === 'Gasto').length} gastos</span>
             </div>
           </CardContent>
         </Card>
@@ -321,7 +392,7 @@ export default function FinanzasView() {
             </div>
             <p className="text-3xl font-bold text-white mb-2">{margen.toFixed(1)}%</p>
             <div className="flex items-center gap-1 text-xs text-white/80 font-medium">
-              <span>Rentabilidad</span>
+              <span>{margen >= 0 ? 'Rentable' : 'Déficit'} • {dateRange.text}</span>
             </div>
           </CardContent>
         </Card>
@@ -339,27 +410,157 @@ export default function FinanzasView() {
         <TabsContent value="overview" className="space-y-6">
           <div className="grid grid-cols-3 gap-6">
             <div className="col-span-2">
-              <DynamicChart
-                data={chartDataByDate}
-                type="composed"
-                title="Balance Financiero"
-                description="Ingresos (Barras) vs Gastos (Línea)"
-                xKey="name"
-                yKey="ingresos"
-                yKey2="gastos"
-              />
+              <Card className="h-full border border-gray-200 bg-white shadow-sm hover:shadow-md transition-shadow">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-lg font-semibold text-gray-800">Balance Financiero</CardTitle>
+                  <CardDescription className="text-sm text-gray-500">Ingresos (Barras) vs Gastos (Línea)</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="h-[300px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <ComposedChart
+                        data={chartDataByDate}
+                        margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                        <XAxis 
+                          dataKey="name" 
+                          tick={{ fill: '#64748b', fontSize: 11 }}
+                          axisLine={false}
+                          tickLine={false}
+                          tickFormatter={(value) => new Date(value).toLocaleDateString('es-MX', { month: 'short', day: 'numeric' })}
+                        />
+                        <YAxis 
+                          tick={{ fill: '#64748b', fontSize: 11 }}
+                          axisLine={false}
+                          tickLine={false}
+                          tickFormatter={(value) => `$${(value / 1000).toFixed(0)}k`}
+                        />
+                        <Tooltip 
+                          cursor={{ fill: '#f1f5f9' }}
+                          contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                          formatter={(value: number) => [`$${value.toLocaleString()}`, 'Monto']}
+                          labelFormatter={(label) => new Date(label).toLocaleDateString('es-MX', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+                        />
+                        <Bar dataKey="ingresos" fill="#10b981" radius={[4, 4, 0, 0]} barSize={20} name="Ingresos" />
+                        <Bar dataKey="gastos" fill="#ef4444" radius={[4, 4, 0, 0]} barSize={20} name="Gastos" />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                </CardContent>
+              </Card>
             </div>
             <div>
-              <DynamicChart
-                data={chartDataByCategory}
-                type="bar"
-                title="Top Gastos por Categoría"
-                description="Principales fugas de capital"
-                xKey="value"
-                yKey="value"
-                nameKey="name"
-              />
+              <Card className="h-full border border-gray-200 bg-white shadow-sm hover:shadow-md transition-shadow">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-lg font-semibold text-gray-800">Top Gastos por Categoría</CardTitle>
+                  <CardDescription className="text-sm text-gray-500">
+                    Principales fugas de capital • <span className="font-mono text-xs">Top 7 categorías</span>
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="h-[300px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart
+                        data={chartDataByCategory}
+                        layout="vertical"
+                        margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" horizontal={true} vertical={false} stroke="#e2e8f0" />
+                        <XAxis type="number" hide />
+                        <YAxis 
+                          dataKey="name" 
+                          type="category" 
+                          width={100}
+                          tick={{ fill: '#64748b', fontSize: 11 }}
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <Tooltip 
+                          cursor={{ fill: '#f1f5f9' }}
+                          contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                          formatter={(value: number) => [
+                            `$${value.toLocaleString()} (${((value / totalGastos) * 100).toFixed(1)}% del total)`,
+                            'Gasto'
+                          ]}
+                          labelFormatter={(label) => `Categoría: ${label}`}
+                        />
+                        <Bar dataKey="value" fill="#f59e0b" radius={[0, 4, 4, 0]} barSize={24} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </CardContent>
+              </Card>
             </div>
+          </div>
+
+          {/* Nueva fila: Flujo de Efectivo Acumulado */}
+          <div className="grid grid-cols-1 gap-6">
+            <Card className="border border-gray-200 bg-white shadow-sm hover:shadow-md transition-shadow">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-lg font-semibold text-gray-800">Flujo de Efectivo Acumulado</CardTitle>
+                <CardDescription className="text-sm text-gray-500">
+                  Balance acumulativo en el tiempo • <span className="font-mono text-xs">Cálculo: Σ(Ingresos - Gastos)</span>
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="h-[280px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <AreaChart
+                      data={chartDataCumulativeFlow}
+                      margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+                    >
+                      <defs>
+                        <linearGradient id="colorAcumulado" x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3}/>
+                          <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
+                        </linearGradient>
+                      </defs>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                      <XAxis 
+                        dataKey="name" 
+                        tick={{ fill: '#64748b', fontSize: 11 }}
+                        axisLine={false}
+                        tickLine={false}
+                        tickFormatter={(value) => new Date(value).toLocaleDateString('es-MX', { month: 'short', day: 'numeric' })}
+                      />
+                      <YAxis 
+                        tick={{ fill: '#64748b', fontSize: 11 }}
+                        axisLine={false}
+                        tickLine={false}
+                        tickFormatter={(value) => `$${(value / 1000).toFixed(0)}k`}
+                      />
+                      <Tooltip 
+                        cursor={{ stroke: '#3b82f6', strokeWidth: 1, strokeDasharray: '5 5' }}
+                        contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                        formatter={(value: number, name: string) => {
+                          if (name === 'acumulado') return [`$${value.toLocaleString()}`, 'Balance Acumulado'];
+                          return [`$${value.toLocaleString()}`, 'Balance del Día'];
+                        }}
+                        labelFormatter={(label) => new Date(label).toLocaleDateString('es-MX', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+                      />
+                      <Area 
+                        type="monotone" 
+                        dataKey="acumulado" 
+                        stroke="#3b82f6" 
+                        strokeWidth={2}
+                        fill="url(#colorAcumulado)" 
+                        name="Balance Acumulado"
+                      />
+                      <Line 
+                        type="monotone" 
+                        dataKey="balanceDia" 
+                        stroke="#10b981" 
+                        strokeWidth={1}
+                        strokeDasharray="3 3"
+                        dot={false}
+                        name="Balance del Día"
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                </div>
+              </CardContent>
+            </Card>
           </div>
         </TabsContent>
 
@@ -452,26 +653,38 @@ export default function FinanzasView() {
                               </span>
                             </td>
                             <td className="p-3">
-                              <div className="flex items-center justify-center gap-2">
+                              <div className="flex items-center gap-2">
                                 <Button
                                   variant="ghost"
                                   size="sm"
-                                  className="gap-1.5 hover:bg-blue-50 hover:text-blue-700"
+                                  className="text-blue-600 hover:text-blue-800 hover:bg-blue-50"
                                   onClick={() => setSelectedFile(file)}
-                                  title="Inspeccionar datos crudos de este archivo"
                                 >
                                   <Eye className="w-4 h-4" />
-                                  Ver Detalle
                                 </Button>
                                 <Button
                                   variant="ghost"
                                   size="sm"
-                                  className="hover:bg-red-50 hover:text-red-700"
-                                  onClick={() => {
-                                    setProcessedFiles(processedFiles.filter(f => f.id !== file.id));
-                                    setAllRecords(allRecords.filter(r => r.fileId !== file.id));
+                                  className="text-red-600 hover:text-red-800 hover:bg-red-50"
+                                  onClick={async () => {
+                                    const confirmed = await confirm('¿Eliminar este archivo y todos sus registros?');
+                                    if (confirmed) {
+                                      try {
+                                        const { error } = await supabase
+                                          .from('upload_logs')
+                                          .delete()
+                                          .eq('id', file.id);
+                                        
+                                        if (error) throw error;
+                                        
+                                        await fetchData();
+                                        showSuccess('Archivo eliminado correctamente');
+                                      } catch (err) {
+                                        console.error('Error deleting file:', err);
+                                        showError('Error al eliminar el archivo');
+                                      }
+                                    }
                                   }}
-                                  title="Eliminar archivo del warehouse"
                                 >
                                   <Trash2 className="w-4 h-4" />
                                 </Button>

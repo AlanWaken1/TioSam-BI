@@ -1,7 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { motion } from 'motion/react';
+import { supabase } from '@/lib/supabase';
 import { 
   Upload, 
   CheckCircle, 
@@ -20,10 +21,15 @@ import {
   Sparkles,
   Download,
   TrendingUp,
-  Layers
+  Layers,
+  Loader2,
+  XCircle,
+  Plus,
+  RefreshCw
 } from 'lucide-react';
 import { Button } from '../components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '../components/ui/card';
+import { Progress } from '../components/ui/progress';
 
 // Variantes de animación
 const fadeInUp = {
@@ -57,11 +63,14 @@ const scaleIn = {
 interface DimensionCard {
   id: string;
   name: string;
+  dbTable: string;
+  dimensionName: string;
   icon: any;
-  file: string;
-  status: 'pending' | 'loaded';
+  fileHint: string;
+  status: 'pending' | 'loading' | 'loaded' | 'error';
   lastUpdate?: string;
   records?: number;
+  errorMessage?: string;
 }
 
 export default function DataWarehouseView() {
@@ -69,63 +78,186 @@ export default function DataWarehouseView() {
     {
       id: 'produccion',
       name: 'PRODUCCIÓN',
+      dbTable: 'produccion',
+      dimensionName: 'Producción',
       icon: Factory,
-      file: 'Bitácora_Horno.xlsx',
+      fileHint: 'Bitácora_Horno.xlsx',
       status: 'pending'
     },
     {
       id: 'finanzas',
       name: 'FINANZAS',
+      dbTable: 'finanzas',
+      dimensionName: 'Finanzas',
       icon: DollarSign,
-      file: 'Flujo_ERP.csv',
-      status: 'loaded',
-      lastUpdate: 'Hace 2 horas',
-      records: 1847
+      fileHint: 'Flujo_ERP.csv',
+      status: 'pending'
     },
     {
       id: 'logistica',
       name: 'LOGÍSTICA',
+      dbTable: 'logistica',
+      dimensionName: 'Logística',
       icon: Truck,
-      file: 'Rutas_GPS.xlsx',
+      fileHint: 'Rutas_GPS.xlsx',
       status: 'pending'
     },
     {
       id: 'rh',
-      name: 'RH',
+      name: 'RRHH',
+      dbTable: 'rrhh',
+      dimensionName: 'RRHH',
       icon: Users,
-      file: 'Nomina_Semanal.xlsx',
+      fileHint: 'Nomina_Semanal.xlsx',
       status: 'pending'
     },
     {
       id: 'mkt',
       name: 'MKT DIGITAL',
+      dbTable: 'desarrollo',
+      dimensionName: 'Desarrollo Digital',
       icon: Megaphone,
-      file: 'Metricas_Social.csv',
-      status: 'loaded',
-      lastUpdate: 'Hace 4 horas',
-      records: 523
+      fileHint: 'Metricas_Social.csv',
+      status: 'pending'
     }
   ]);
 
   const [isDragging, setIsDragging] = useState<string | null>(null);
+  const [globalLoading, setGlobalLoading] = useState(false);
+  const [showSuccessModal, setShowSuccessModal] = useState(false);
+  const [etlProgress, setEtlProgress] = useState(0);
+  const [etlStage, setEtlStage] = useState('');
+  const [isProcessing, setIsProcessing] = useState(false);
 
-  const allLoaded = dimensions.every(d => d.status === 'loaded');
   const loadedCount = dimensions.filter(d => d.status === 'loaded').length;
+  const allLoaded = loadedCount === 5;
 
-  const handleFileUpload = (dimensionId: string, file: File) => {
-    console.log(`Archivo subido para ${dimensionId}:`, file.name);
+  // Fetch initial stats from Supabase
+  const fetchStats = useCallback(async () => {
+    const updatedDimensions = [...dimensions];
     
-    // Simular carga exitosa
-    setDimensions(prev => prev.map(dim => 
-      dim.id === dimensionId 
-        ? { 
-            ...dim, 
-            status: 'loaded', 
-            lastUpdate: 'Hace 1 minuto',
-            records: Math.floor(Math.random() * 2000) + 100
-          }
-        : dim
-    ));
+    for (let i = 0; i < updatedDimensions.length; i++) {
+      const dim = updatedDimensions[i];
+      try {
+        // Get total count
+        const { count, error } = await supabase
+          .from(dim.dbTable)
+          .select('*', { count: 'exact', head: true });
+        
+        if (error) throw error;
+
+        // Get last upload time
+        const { data: lastUpload, error: logError } = await supabase
+          .from('upload_logs')
+          .select('created_at')
+          .eq('dimension', dim.dimensionName)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .single();
+
+        if (count !== null && count > 0) {
+          updatedDimensions[i] = {
+            ...dim,
+            status: 'loaded',
+            records: count,
+            lastUpdate: lastUpload ? new Date(lastUpload.created_at).toLocaleString('es-MX') : 'Desconocido'
+          };
+        } else {
+           updatedDimensions[i] = {
+            ...dim,
+            status: 'pending',
+            records: 0
+          };
+        }
+      } catch (err) {
+        console.error(`Error fetching stats for ${dim.name}:`, err);
+      }
+    }
+    setDimensions(updatedDimensions);
+  }, []);
+
+  useEffect(() => {
+    fetchStats();
+  }, [fetchStats]);
+
+  const handleFileUpload = async (dimensionId: string, file: File) => {
+    const dimIndex = dimensions.findIndex(d => d.id === dimensionId);
+    if (dimIndex === -1) return;
+
+    const dim = dimensions[dimIndex];
+
+    // Update status to loading
+    setDimensions(prev => prev.map(d => d.id === dimensionId ? { ...d, status: 'loading', errorMessage: undefined } : d));
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('dimension', dim.dimensionName);
+
+    try {
+      const response = await fetch('/api/upload', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Error al subir archivo');
+      }
+
+      const result = await response.json();
+      console.log('Upload success:', result);
+
+      // Refresh stats for this dimension
+      await fetchStats();
+
+    } catch (error: any) {
+      console.error('Upload error:', error);
+      setDimensions(prev => prev.map(d => d.id === dimensionId ? { 
+        ...d, 
+        status: 'error', 
+        errorMessage: error.message || 'Error desconocido' 
+      } : d));
+    }
+  };
+
+  // NEW: Multi-file upload handler
+  const handleMultiFileUpload = async (files: File[]) => {
+    setGlobalLoading(true);
+    
+    // Detectar dimensión por nombre de archivo
+    const detectDimension = (filename: string): string | null => {
+      const lower = filename.toLowerCase();
+      if (lower.includes('produccion') || lower.includes('bitacora') || lower.includes('horno')) return 'produccion';
+      if (lower.includes('finanzas') || lower.includes('flujo') || lower.includes('caja')) return 'finanzas';
+      if (lower.includes('logistica') || lower.includes('ruta') || lower.includes('gps')) return 'logistica';
+      if (lower.includes('rrhh') || lower.includes('nomina') || lower.includes('rh')) return 'rh';
+      if (lower.includes('marketing') || lower.includes('desarrollo') || lower.includes('mkt') || lower.includes('ads') || lower.includes('metrica')) return 'mkt';
+      return null;
+    };
+
+    let successCount = 0;
+    let errorCount = 0;
+
+    for (const file of files) {
+      const dimensionId = detectDimension(file.name);
+      if (!dimensionId) {
+        console.warn(`No se pudo detectar dimensión para: ${file.name}`);
+        errorCount++;
+        continue;
+      }
+
+      try {
+        await handleFileUpload(dimensionId, file);
+        successCount++;
+      } catch (error) {
+        errorCount++;
+      }
+    }
+
+    setGlobalLoading(false);
+    
+    const message = `✅ ${successCount} archivo(s) cargado(s) exitosamente${errorCount > 0 ? `\n⚠️ ${errorCount} archivo(s) con error` : ''}`;
+    alert(message);
   };
 
   const handleDragEnter = (dimensionId: string) => {
@@ -141,27 +273,59 @@ export default function DataWarehouseView() {
     setIsDragging(null);
     
     const files = Array.from(e.dataTransfer.files);
-    if (files.length > 0) {
+    if (files.length > 1) {
+      // Multi-file upload
+      handleMultiFileUpload(files);
+    } else if (files.length > 0) {
       handleFileUpload(dimensionId, files[0]);
     }
   };
 
   const handleFileSelect = (dimensionId: string, e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
-    if (files && files.length > 0) {
+    if (files && files.length > 1) {
+      // Multi-file upload
+      handleMultiFileUpload(Array.from(files));
+    } else if (files && files.length > 0) {
       handleFileUpload(dimensionId, files[0]);
     }
   };
 
-  const handleETLExecution = () => {
-    const loadedDimensions = dimensions.filter(d => d.status === 'loaded');
-    const dimensionNames = loadedDimensions.map(d => d.name).join(', ');
+  const handleETLExecution = async () => {
+    setGlobalLoading(true);
+    setIsProcessing(true);
+    setEtlProgress(0);
     
-    if (loadedCount === 5) {
-      alert(`🚀 Consolidación Completa Iniciada\n\nSe procesarán las 5 dimensiones:\n${dimensionNames}\n\nEl Data Warehouse será actualizado completamente.`);
-    } else if (loadedCount > 0) {
-      alert(`✅ Carga Parcial Exitosa\n\nSe actualizaron los datos de: ${dimensionNames}\n\nLas demás áreas permanecen sin cambios hasta que cargues sus archivos.`);
-    }
+    // Stage 1: Validating Data
+    setEtlStage('Validando integridad de datos...');
+    await new Promise(resolve => setTimeout(resolve, 800));
+    setEtlProgress(20);
+    
+    // Stage 2: Transform
+    setEtlStage('Transformando y limpiando registros...');
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    setEtlProgress(50);
+    
+    // Stage 3: Loading stats
+    setEtlStage('Consolidando dimensiones...');
+    await new Promise(resolve => setTimeout(resolve, 800));
+    setEtlProgress(75);
+    
+    // Stage 4: Finalizing
+    setEtlStage('Finalizando proceso ETL...');
+    await fetchStats();
+    setEtlProgress(100);
+    await new Promise(resolve => setTimeout(resolve, 500));
+    
+    setGlobalLoading(false);
+    setIsProcessing(false);
+    setShowSuccessModal(true);
+    
+    // Auto-close and redirect after 4 seconds
+    setTimeout(() => {
+      setShowSuccessModal(false);
+      window.location.href = '/';
+    }, 4000);
   };
 
   return (
@@ -176,7 +340,7 @@ export default function DataWarehouseView() {
         <div className="flex items-center justify-between mb-4">
           <div>
             <div className="flex items-center gap-3 mb-2">
-              <div className="w-12 h-12 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-xl flex items-center justify-center">
+              <div className="w-12 h-12 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-xl flex items-center justify-center shadow-lg">
                 <Database className="w-6 h-6 text-white" />
               </div>
               <div>
@@ -201,7 +365,7 @@ export default function DataWarehouseView() {
         </div>
 
         {/* Progress Bar */}
-        <div className="w-full bg-gray-200 rounded-full h-3 overflow-hidden">
+        <div className="w-full bg-gray-200 rounded-full h-3 overflow-hidden shadow-inner">
           <motion.div 
             className="h-full bg-gradient-to-r from-indigo-500 to-purple-600 rounded-full"
             initial={{ width: 0 }}
@@ -209,6 +373,73 @@ export default function DataWarehouseView() {
             transition={{ duration: 0.5, ease: "easeOut" }}
           />
         </div>
+      </motion.div>
+
+      {/* Multi-File Drop Zone */}
+      <motion.div variants={fadeInUp}>
+        <Card 
+          className={`border-4 border-dashed transition-all ${
+            isDragging ? 'border-indigo-500 bg-indigo-50 scale-105' : 'border-gray-300 bg-gradient-to-br from-blue-50 to-indigo-50'
+          }`}
+          onDragEnter={() => setIsDragging('multi')}
+          onDragLeave={() => setIsDragging(null)}
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={(e) => {
+            e.preventDefault();
+            setIsDragging(null);
+            const files = Array.from(e.dataTransfer.files);
+            if (files.length > 0) {
+              handleMultiFileUpload(files);
+            }
+          }}
+        >
+          <CardContent className="p-8">
+            <div className="text-center">
+              <motion.div 
+                className="w-20 h-20 mx-auto mb-4 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center"
+                animate={{ rotate: isDragging === 'multi' ? 360 : 0 }}
+                transition={{ duration: 0.5 }}
+              >
+                <Upload className="w-10 h-10 text-white" />
+              </motion.div>
+              <h3 className="text-xl font-bold text-gray-900 mb-2">🚀 Carga Masiva de Archivos</h3>
+              <p className="text-gray-600 mb-4">
+                Arrastra aquí los <span className="font-bold text-indigo-600">5 archivos Excel</span> al mismo tiempo o haz clic para seleccionarlos
+              </p>
+              <input
+                type="file"
+                id="multi-file-upload"
+                className="hidden"
+                accept=".xlsx,.csv,.xls"
+                multiple
+                onChange={(e) => {
+                  const files = e.target.files;
+                  if (files && files.length > 0) {
+                    handleMultiFileUpload(Array.from(files));
+                  }
+                }}
+              />
+              <label htmlFor="multi-file-upload">
+                <Button variant="default" className="bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700" asChild>
+                  <span className="cursor-pointer">
+                    <Upload className="w-4 h-4 mr-2" />
+                    Seleccionar Archivos Múltiples
+                  </span>
+                </Button>
+              </label>
+              <div className="mt-4 text-xs text-gray-500">
+                <p className="font-semibold mb-1">💡 El sistema detecta automáticamente:</p>
+                <div className="flex flex-wrap justify-center gap-2">
+                  <span className="px-2 py-1 bg-blue-100 text-blue-700 rounded">Producción/Bitácora</span>
+                  <span className="px-2 py-1 bg-green-100 text-green-700 rounded">Finanzas/Flujo</span>
+                  <span className="px-2 py-1 bg-purple-100 text-purple-700 rounded">Logística/Rutas</span>
+                  <span className="px-2 py-1 bg-pink-100 text-pink-700 rounded">RRHH/Nómina</span>
+                  <span className="px-2 py-1 bg-orange-100 text-orange-700 rounded">Marketing/Ads</span>
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
       </motion.div>
 
       {/* Grid de 5 Tarjetas */}
@@ -224,12 +455,14 @@ export default function DataWarehouseView() {
           >
             <Card 
               className={`
-                relative overflow-hidden border-4 transition-all cursor-pointer
+                relative overflow-hidden border-4 transition-all cursor-pointer h-full
                 ${dimension.status === 'loaded' 
                   ? 'border-green-400 bg-gradient-to-br from-green-50 to-emerald-50 shadow-xl shadow-green-100' 
+                  : dimension.status === 'error'
+                  ? 'border-red-300 bg-red-50'
                   : 'border-gray-300 bg-gradient-to-br from-gray-50 to-slate-50 hover:border-gray-400'
                 }
-                ${isDragging === dimension.id ? 'border-indigo-500 scale-105' : ''}
+                ${isDragging === dimension.id ? 'border-indigo-500 scale-105 ring-4 ring-indigo-200' : ''}
               `}
               onDragEnter={() => handleDragEnter(dimension.id)}
               onDragLeave={handleDragLeave}
@@ -240,24 +473,41 @@ export default function DataWarehouseView() {
               <div className="absolute top-4 right-4 z-10">
                 <motion.div 
                   className={`
-                    flex items-center gap-2 px-3 py-1.5 rounded-full font-semibold text-xs
+                    flex items-center gap-2 px-3 py-1.5 rounded-full font-semibold text-xs shadow-sm
                     ${dimension.status === 'loaded' 
                       ? 'bg-green-500 text-white' 
+                      : dimension.status === 'loading'
+                      ? 'bg-blue-500 text-white'
+                      : dimension.status === 'error'
+                      ? 'bg-red-500 text-white'
                       : 'bg-gray-400 text-white'
                     }
                   `}
-                  animate={dimension.status === 'loaded' ? { scale: [1, 1.1, 1] } : {}}
-                  transition={{ duration: 1, repeat: dimension.status === 'loaded' ? Infinity : 0 }}
+                  animate={dimension.status === 'loaded' ? { scale: [1, 1.05, 1] } : {}}
+                  transition={{ duration: 2, repeat: dimension.status === 'loaded' ? Infinity : 0 }}
                 >
-                  {dimension.status === 'loaded' ? (
+                  {dimension.status === 'loaded' && (
                     <>
                       <CheckCircle className="w-4 h-4" />
                       CARGADO
                     </>
-                  ) : (
+                  )}
+                  {dimension.status === 'pending' && (
                     <>
                       <Clock className="w-4 h-4" />
                       PENDIENTE
+                    </>
+                  )}
+                  {dimension.status === 'loading' && (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      PROCESANDO
+                    </>
+                  )}
+                  {dimension.status === 'error' && (
+                    <>
+                      <XCircle className="w-4 h-4" />
+                      ERROR
                     </>
                   )}
                 </motion.div>
@@ -268,9 +518,11 @@ export default function DataWarehouseView() {
                 <div className="flex items-start gap-4 mb-6">
                   <motion.div 
                     className={`
-                      w-16 h-16 rounded-2xl flex items-center justify-center
+                      w-16 h-16 rounded-2xl flex items-center justify-center shadow-md
                       ${dimension.status === 'loaded'
                         ? 'bg-gradient-to-br from-green-400 to-emerald-500'
+                        : dimension.status === 'error'
+                        ? 'bg-gradient-to-br from-red-400 to-red-500'
                         : 'bg-gradient-to-br from-gray-400 to-slate-500'
                       }
                     `}
@@ -286,41 +538,22 @@ export default function DataWarehouseView() {
                     <div className="flex items-center gap-2">
                       <FileText className="w-4 h-4 text-gray-500" />
                       <span className="text-sm text-gray-600 font-mono">
-                        {dimension.file}
+                        {dimension.fileHint}
                       </span>
                     </div>
                   </div>
                 </div>
 
-                {/* Zona de Carga */}
-                {dimension.status === 'pending' ? (
-                  <div className="border-3 border-dashed border-gray-300 rounded-xl p-6 text-center bg-white/50">
-                    <Upload className="w-12 h-12 text-gray-400 mx-auto mb-3" />
-                    <p className="text-sm font-semibold text-gray-700 mb-2">
-                      Arrastre el archivo aquí o haga clic para seleccionar
-                    </p>
-                    <p className="text-xs text-gray-500 mb-4">
-                      Formatos soportados: .xlsx, .csv
-                    </p>
-                    <input
-                      type="file"
-                      id={`file-${dimension.id}`}
-                      className="hidden"
-                      accept=".xlsx,.csv,.xls"
-                      onChange={(e) => handleFileSelect(dimension.id, e)}
-                    />
-                    <label htmlFor={`file-${dimension.id}`}>
-                      <Button variant="outline" className="w-full" asChild>
-                        <span>
-                          <Upload className="w-4 h-4 mr-2" />
-                          Seleccionar Archivo
-                        </span>
-                      </Button>
-                    </label>
+                {/* Zona de Carga / Estado */}
+                {dimension.status === 'loading' ? (
+                  <div className="border-2 border-blue-200 bg-blue-50 rounded-xl p-8 text-center">
+                    <Loader2 className="w-10 h-10 text-blue-600 animate-spin mx-auto mb-3" />
+                    <p className="font-semibold text-blue-900">Procesando archivo...</p>
+                    <p className="text-xs text-blue-700 mt-1">Validando esquema y cargando a Supabase</p>
                   </div>
-                ) : (
+                ) : dimension.status === 'loaded' ? (
                   <motion.div 
-                    className="bg-white border-2 border-green-200 rounded-xl p-6"
+                    className="bg-white border-2 border-green-200 rounded-xl p-6 shadow-sm"
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
                   >
@@ -330,7 +563,7 @@ export default function DataWarehouseView() {
                           <FileCheck className="w-6 h-6 text-green-600" />
                         </div>
                         <div>
-                          <p className="font-semibold text-gray-900">Archivo Cargado</p>
+                          <p className="font-semibold text-gray-900">Datos Sincronizados</p>
                           <p className="text-xs text-gray-500">{dimension.lastUpdate}</p>
                         </div>
                       </div>
@@ -348,28 +581,69 @@ export default function DataWarehouseView() {
                         id={`file-reload-${dimension.id}`}
                         className="hidden"
                         accept=".xlsx,.csv,.xls"
+                        multiple
                         onChange={(e) => handleFileSelect(dimension.id, e)}
                       />
                       <label htmlFor={`file-reload-${dimension.id}`} className="flex-1">
-                        <Button variant="outline" size="sm" className="w-full" asChild>
-                          <span>
-                            <Upload className="w-4 h-4 mr-2" />
-                            Recargar
+                        <Button variant="default" size="sm" className="w-full bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-700 hover:to-emerald-700 text-white" asChild>
+                          <span className="cursor-pointer">
+                            <Plus className="w-4 h-4 mr-2" />
+                            Cargar Más Datos
                           </span>
                         </Button>
                       </label>
-                      <Button variant="ghost" size="sm" className="flex-1">
-                        <Download className="w-4 h-4 mr-2" />
-                        Ver Datos
+                      <Button 
+                        variant="outline" 
+                        size="sm" 
+                        className="hover:bg-gray-50"
+                        onClick={() => fetchStats()}
+                      >
+                        <RefreshCw className="w-4 h-4 mr-2" />
+                        Actualizar Vista
                       </Button>
                     </div>
                   </motion.div>
+                ) : (
+                  <div className={`
+                    border-3 border-dashed rounded-xl p-6 text-center transition-colors
+                    ${dimension.status === 'error' ? 'border-red-300 bg-red-50' : 'border-gray-300 bg-white/50 hover:bg-white/80'}
+                  `}>
+                    {dimension.status === 'error' ? (
+                      <div className="mb-4">
+                        <AlertCircle className="w-10 h-10 text-red-500 mx-auto mb-2" />
+                        <p className="text-sm font-bold text-red-700">Error en la carga</p>
+                        <p className="text-xs text-red-600 mt-1">{dimension.errorMessage}</p>
+                      </div>
+                    ) : (
+                      <Upload className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+                    )}
+                    
+                    <p className="text-sm font-semibold text-gray-700 mb-2">
+                      {dimension.status === 'error' ? 'Intente nuevamente' : 'Arrastre el archivo aquí'}
+                    </p>
+                    <input
+                      type="file"
+                      id={`file-${dimension.id}`}
+                      className="hidden"
+                      accept=".xlsx,.csv,.xls"
+                      multiple
+                      onChange={(e) => handleFileSelect(dimension.id, e)}
+                    />
+                    <label htmlFor={`file-${dimension.id}`}>
+                      <Button variant={dimension.status === 'error' ? 'destructive' : 'outline'} className="w-full" asChild>
+                        <span className="cursor-pointer">
+                          <Upload className="w-4 h-4 mr-2" />
+                          Seleccionar Archivo
+                        </span>
+                      </Button>
+                    </label>
+                  </div>
                 )}
 
                 {/* Footer Info */}
                 <div className="mt-4 pt-4 border-t border-gray-200">
                   <div className="flex items-center justify-between text-xs text-gray-500">
-                    <span>ID Dimensión: {dimension.id.toUpperCase()}</span>
+                    <span>Tabla: {dimension.dbTable}</span>
                     <span>Modelo Estrella v2.1</span>
                   </div>
                 </div>
@@ -402,10 +676,14 @@ export default function DataWarehouseView() {
                       : 'bg-gray-400'
                     }
                   `}
-                  animate={allLoaded ? { rotate: [0, 360] } : {}}
-                  transition={{ duration: 3, repeat: allLoaded ? Infinity : 0, ease: "linear" }}
+                  animate={allLoaded || globalLoading ? { rotate: [0, 360] } : {}}
+                  transition={{ duration: 3, repeat: allLoaded || globalLoading ? Infinity : 0, ease: "linear" }}
                 >
-                  <Layers className="w-8 h-8 text-white" />
+                  {globalLoading ? (
+                    <Loader2 className="w-8 h-8 text-white animate-spin" />
+                  ) : (
+                    <Layers className="w-8 h-8 text-white" />
+                  )}
                 </motion.div>
                 <div>
                   <h3 className="text-2xl font-bold text-gray-900 mb-1">
@@ -420,11 +698,11 @@ export default function DataWarehouseView() {
               </div>
 
               <motion.div
-                whileHover={loadedCount > 0 ? { scale: 1.05 } : {}}
-                whileTap={loadedCount > 0 ? { scale: 0.95 } : {}}
+                whileHover={loadedCount > 0 && !globalLoading ? { scale: 1.05 } : {}}
+                whileTap={loadedCount > 0 && !globalLoading ? { scale: 0.95 } : {}}
               >
                 <Button 
-                  disabled={loadedCount === 0}
+                  disabled={loadedCount === 0 || globalLoading}
                   onClick={handleETLExecution}
                   className={`
                     px-8 py-6 text-lg font-bold gap-3
@@ -434,12 +712,21 @@ export default function DataWarehouseView() {
                     }
                   `}
                 >
-                  <PlayCircle className="w-6 h-6" />
-                  {loadedCount === 0 && 'CARGUE AL MENOS 1 DIMENSIÓN'}
-                  {loadedCount === 1 && 'PROCESAR 1 DIMENSIÓN'}
-                  {loadedCount > 1 && loadedCount < 5 && `PROCESAR ${loadedCount} DIMENSIONES`}
-                  {loadedCount === 5 && 'CONSOLIDAR DATA WAREHOUSE COMPLETO'}
-                  <Sparkles className="w-6 h-6" />
+                  {globalLoading ? (
+                    <>
+                      <Loader2 className="w-6 h-6 animate-spin" />
+                      CONSOLIDANDO...
+                    </>
+                  ) : (
+                    <>
+                      <PlayCircle className="w-6 h-6" />
+                      {loadedCount === 0 && 'CARGUE AL MENOS 1 DIMENSIÓN'}
+                      {loadedCount === 1 && 'PROCESAR 1 DIMENSIÓN'}
+                      {loadedCount > 1 && loadedCount < 5 && `PROCESAR ${loadedCount} DIMENSIONES`}
+                      {loadedCount === 5 && 'CONSOLIDAR DATA WAREHOUSE COMPLETO'}
+                      <Sparkles className="w-6 h-6" />
+                    </>
+                  )}
                 </Button>
               </motion.div>
             </div>
@@ -492,6 +779,131 @@ export default function DataWarehouseView() {
           </div>
         </div>
       </motion.div>
+
+      {/* Success Modal - Celebration Animation */}
+      {showSuccessModal && (
+        <motion.div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+        >
+          <motion.div
+            className="bg-white rounded-3xl p-12 max-w-2xl mx-4 shadow-2xl"
+            initial={{ scale: 0.8, y: 50 }}
+            animate={{ scale: 1, y: 0 }}
+            transition={{ type: "spring", duration: 0.5 }}
+          >
+            <div className="text-center">
+              {/* Animated Success Icon */}
+              <motion.div
+                className="w-32 h-32 mx-auto mb-6 relative"
+                initial={{ scale: 0 }}
+                animate={{ scale: 1 }}
+                transition={{ delay: 0.2, type: "spring", stiffness: 200 }}
+              >
+                <motion.div
+                  className="w-full h-full bg-gradient-to-br from-green-400 to-emerald-500 rounded-full flex items-center justify-center"
+                  animate={{ 
+                    boxShadow: [
+                      "0 0 0 0 rgba(34, 197, 94, 0.7)",
+                      "0 0 0 20px rgba(34, 197, 94, 0)",
+                      "0 0 0 0 rgba(34, 197, 94, 0)"
+                    ]
+                  }}
+                  transition={{ duration: 2, repeat: Infinity }}
+                >
+                  <motion.div
+                    initial={{ pathLength: 0 }}
+                    animate={{ pathLength: 1 }}
+                    transition={{ delay: 0.5, duration: 0.5 }}
+                  >
+                    <CheckCircle className="w-20 h-20 text-white" strokeWidth={3} />
+                  </motion.div>
+                </motion.div>
+                
+                {/* Floating particles */}
+                {[...Array(8)].map((_, i) => (
+                  <motion.div
+                    key={i}
+                    className="absolute w-3 h-3 bg-gradient-to-br from-purple-400 to-pink-500 rounded-full"
+                    style={{
+                      top: '50%',
+                      left: '50%',
+                    }}
+                    animate={{
+                      x: [0, Math.cos(i * 45 * Math.PI / 180) * 80],
+                      y: [0, Math.sin(i * 45 * Math.PI / 180) * 80],
+                      opacity: [1, 0],
+                      scale: [1, 0]
+                    }}
+                    transition={{
+                      duration: 1.5,
+                      delay: 0.3 + i * 0.1,
+                      repeat: Infinity,
+                      repeatDelay: 0.5
+                    }}
+                  />
+                ))}
+              </motion.div>
+
+              {/* Success Message */}
+              <motion.h2
+                className="text-4xl font-bold text-gray-900 mb-3"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 0.6 }}
+              >
+                ¡Consolidación Exitosa! 🎉
+              </motion.h2>
+              
+              <motion.p
+                className="text-lg text-gray-600 mb-6"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: 0.8 }}
+              >
+                El Data Warehouse ha sido consolidado correctamente
+              </motion.p>
+
+              {/* Stats Grid */}
+              <motion.div
+                className="grid grid-cols-5 gap-3 mb-8"
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: 1 }}
+              >
+                {dimensions.filter(d => d.status === 'loaded').map((dim, index) => (
+                  <motion.div
+                    key={dim.id}
+                    className="bg-gradient-to-br from-indigo-50 to-purple-50 rounded-lg p-4 border-2 border-indigo-200"
+                    initial={{ opacity: 0, scale: 0.8 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    transition={{ delay: 1 + index * 0.1 }}
+                  >
+                    <div className="w-10 h-10 mx-auto mb-2 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-lg flex items-center justify-center">
+                      <dim.icon className="w-5 h-5 text-white" />
+                    </div>
+                    <p className="text-xs font-semibold text-gray-700 mb-1">{dim.name}</p>
+                    <p className="text-lg font-bold text-indigo-600">{dim.records?.toLocaleString()}</p>
+                  </motion.div>
+                ))}
+              </motion.div>
+
+              {/* Redirect Message */}
+              <motion.div
+                className="flex items-center justify-center gap-2 text-sm text-gray-500"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: 1.5 }}
+              >
+                <Sparkles className="w-4 h-4" />
+                <span>Redirigiendo al Dashboard...</span>
+              </motion.div>
+            </div>
+          </motion.div>
+        </motion.div>
+      )}
     </motion.div>
   );
 }

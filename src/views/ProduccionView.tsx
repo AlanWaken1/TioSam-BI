@@ -1,7 +1,9 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
+import { supabase } from '@/lib/supabase';
+import { useConfirmDialog } from '@/hooks/useConfirmDialog';
 import { 
   Upload, 
   Sparkles,
@@ -28,7 +30,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { FileUploader } from '../components/dashboard/FileUploader';
 import { DataTable } from '../components/dashboard/DataTable';
 import { AIAnalystCard } from '../components/dashboard/AIAnalystCard';
+
 import { DynamicChart } from '../components/dashboard/DynamicChart';
+import { ComposedChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
 interface ProductionRecord {
   id?: string;
@@ -62,73 +66,90 @@ export default function ProduccionView() {
   const [showUploader, setShowUploader] = useState(false);
   const [selectedFile, setSelectedFile] = useState<ProcessedFile | null>(null);
 
-  const handleDataParsed = (data: any[], fileName?: string) => {
-    console.log('Datos CSV parseados:', data);
-    
-    const fileId = `file-${Date.now()}`;
-    
-    const newRecords: ProductionRecord[] = data.map((row, index) => {
-      const findValue = (variants: string[]) => {
-        for (const key of variants) {
-          if (row[key] !== undefined && row[key] !== null && row[key] !== '') {
-            return row[key];
-          }
+  const [isLoading, setIsLoading] = useState(true);
+  const { confirm, showSuccess, showError } = useConfirmDialog();
+
+  const fetchData = async () => {
+    setIsLoading(true);
+    try {
+      const { data: records, error: recordsError } = await supabase
+        .from('produccion')
+        .select('*')
+        .order('fecha_produccion', { ascending: false });
+
+      if (recordsError) throw recordsError;
+
+      const { data: logs, error: logsError } = await supabase
+        .from('upload_logs')
+        .select('*')
+        .eq('dimension', 'Producción')
+        .order('created_at', { ascending: false });
+
+      if (logsError) throw logsError;
+
+      const formattedRecords: ProductionRecord[] = (records || []).map((r: any) => ({
+        id: r.id,
+        fecha_produccion: r.fecha_produccion,
+        lote: r.lote,
+        producto: r.producto,
+        cant_programada: Number(r.cant_programada),
+        cant_real: Number(r.cant_real),
+        merma: Number(r.merma),
+        causa_merma: r.causa_merma,
+        eficiencia: Number(r.eficiencia),
+        fileId: r.upload_id,
+        fecha_registro: r.created_at
+      }));
+
+      setAllRecords(formattedRecords);
+
+      // Transform logs
+      const formattedLogs: ProcessedFile[] = (logs || []).map((l: any) => {
+        const fileRecords = formattedRecords.filter(r => r.fileId === l.id);
+        
+        // Calculate metrics from records
+        let periodoInicio = 'N/A';
+        let periodoFin = 'N/A';
+        let totalProcesado = 0;
+
+        if (fileRecords.length > 0) {
+          // Sort by date to find start/end
+          const sortedDates = [...fileRecords].sort((a, b) => new Date(a.fecha_produccion).getTime() - new Date(b.fecha_produccion).getTime());
+          periodoInicio = sortedDates[0].fecha_produccion;
+          periodoFin = sortedDates[sortedDates.length - 1].fecha_produccion;
+          
+          // Sum total units produced
+          totalProcesado = fileRecords.reduce((sum, r) => sum + r.cant_real, 0);
         }
-        return null;
-      };
 
-      // Mapeo basado en el esquema del usuario:
-      // ['Fecha', 'Lote ID', 'Producto', 'Cant. Programada', 'Cant. Real', 'Merma (Kg)', 'Causa Merma']
-      const fecha_produccion = findValue(['fecha', 'Fecha', 'date', 'Date', 'FECHA']) || new Date().toISOString().split('T')[0];
-      const lote = findValue(['lote_id', 'Lote ID', 'Lote', 'lote', 'batch', 'Batch', 'LOTE']) || `L-${index + 1}`;
-      const producto = findValue(['producto', 'Producto', 'product', 'Product', 'PRODUCTO']) || 'Sin especificar';
-      const cant_programada = parseFloat(findValue(['cant_programada', 'Cant. Programada', 'programada', 'Programada', 'Esperada', 'Meta']) || 0);
-      const cant_real = parseFloat(findValue(['cant_real', 'Cant. Real', 'real', 'Real', 'unidades', 'Unidades', 'Producido']) || 0);
-      const merma = parseFloat(findValue(['merma', 'Merma (Kg)', 'Merma', 'waste', 'Waste', 'Desperdicio', 'Merma Kg']) || 0);
-      const causa_merma = findValue(['causa_merma', 'Causa Merma', 'Causa de Merma', 'causa', 'Causa', 'reason', 'Reason', 'Motivo']) || 'Ninguna';
-      
-      // Calcular eficiencia
-      const eficiencia = cant_programada > 0 ? (cant_real / cant_programada) * 100 : 0;
+        return {
+          id: l.id,
+          fileName: l.filename,
+          periodoInicio,
+          periodoFin,
+          fechaCarga: l.created_at,
+          totalProcesado,
+          totalRegistros: l.total_rows,
+          status: l.status === 'success' ? 'integrado' : 'error',
+          records: fileRecords
+        };
+      });
 
-      return {
-        id: `prod-${Date.now()}-${index}`,
-        fecha_produccion,
-        lote,
-        producto,
-        cant_programada,
-        cant_real,
-        merma,
-        causa_merma,
-        eficiencia,
-        fecha_registro: new Date().toISOString(),
-        fileId,
-      };
-    });
+      setProcessedFiles(formattedLogs);
 
-    console.log('Registros procesados:', newRecords);
-    setAllRecords([...allRecords, ...newRecords]);
+    } catch (error) {
+      console.error('Error fetching data:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
-    // Extraer periodo de los datos
-    const fechas = newRecords.map(r => r.fecha_produccion).sort();
-    const periodoInicio = fechas.length > 0 ? fechas[0] : 'N/A';
-    const periodoFin = fechas.length > 0 ? fechas[fechas.length - 1] : 'N/A';
-    
-    // Calcular total procesado (suma de cant_real)
-    const totalProcesado = newRecords.reduce((sum, r) => sum + r.cant_real, 0);
+  useEffect(() => {
+    fetchData();
+  }, []);
 
-    const newFile: ProcessedFile = {
-      id: fileId,
-      fileName: fileName || `PROD_Archivo_${new Date().toLocaleDateString('es-MX').replace(/\//g, '-')}.xlsx`,
-      periodoInicio,
-      periodoFin,
-      fechaCarga: new Date().toISOString(),
-      totalProcesado,
-      totalRegistros: newRecords.length,
-      status: 'integrado',
-      records: newRecords,
-    };
-
-    setProcessedFiles([newFile, ...processedFiles]);
+  const handleDataParsed = (data: any[], fileName?: string) => {
+    fetchData();
     setShowUploader(false);
   };
 
@@ -136,17 +157,52 @@ export default function ProduccionView() {
     console.log('Editar registro:', row);
   };
 
-  const handleDelete = (row: ProductionRecord) => {
-    setAllRecords(allRecords.filter(r => r.id !== row.id));
+  const handleDelete = async (row: ProductionRecord) => {
+    if (!row.id) return;
+    
+    const confirmed = await confirm(`¿Eliminar lote ${row.lote}?`);
+    if (!confirmed) return;
+
+    try {
+      const { error } = await supabase
+        .from('produccion')
+        .delete()
+        .eq('id', row.id);
+
+      if (error) throw error;
+
+      setAllRecords(allRecords.filter(r => r.id !== row.id));
+      showSuccess('Registro eliminado exitosamente');
+    } catch (error) {
+      console.error('Error deleting record:', error);
+      showError('Error al eliminar el registro');
+    }
   };
 
   const handleCreate = () => {
     setShowUploader(true);
   };
 
+  // Calcular rango de fechas dinámico
+  const dateRange = allRecords.length > 0 ? (() => {
+    const dates = allRecords.map(r => new Date(r.fecha_produccion));
+    const minDate = new Date(Math.min(...dates.map(d => d.getTime())));
+    const maxDate = new Date(Math.max(...dates.map(d => d.getTime())));
+    
+    const formatDate = (date: Date) => date.toLocaleDateString('es-MX', { day: 'numeric', month: 'short' });
+    const formatMonth = (date: Date) => date.toLocaleDateString('es-MX', { month: 'long', year: 'numeric' });
+    
+    if (minDate.getMonth() === maxDate.getMonth() && minDate.getFullYear() === maxDate.getFullYear()) {
+      return { text: formatMonth(minDate), isSameMonth: true };
+    }
+    return { text: `${formatDate(minDate)} - ${formatDate(maxDate)}`, isSameMonth: false };
+  })() : { text: 'Sin datos', isSameMonth: false };
+
   // Calcular métricas
   const totalUnidades = allRecords.reduce((sum, r) => sum + r.cant_real, 0);
+  const totalUnidadesProgramadas = allRecords.reduce((sum, r) => sum + r.cant_programada, 0);
   const totalMerma = allRecords.reduce((sum, r) => sum + r.merma, 0);
+  const porcentajeMerma = totalUnidades > 0 ? (totalMerma / totalUnidades) * 100 : 0;
   const eficienciaPromedio = allRecords.length > 0 
     ? allRecords.reduce((sum, r) => sum + r.eficiencia, 0) / allRecords.length 
     : 0;
@@ -158,8 +214,6 @@ export default function ProduccionView() {
     if (existing) {
       existing.programada += record.cant_programada;
       existing.real += record.cant_real;
-      // Recalcular eficiencia promedio ponderada si fuera necesario, 
-      // pero para visualización simple usaremos el promedio simple o el último valor
       existing.eficiencia = (existing.real / existing.programada) * 100;
     } else {
       acc.push({
@@ -186,7 +240,27 @@ export default function ProduccionView() {
       }
       return acc;
     }, [])
-    .sort((a: any, b: any) => b.value - a.value); // Ordenar por mayor merma
+    .sort((a: any, b: any) => b.value - a.value);
+
+  // Top productos con mayor merma
+  const chartDataByProductMerma = allRecords
+    .reduce((acc: any[], record) => {
+      const existing = acc.find(item => item.name === record.producto);
+      if (existing) {
+        existing.merma += record.merma;
+        existing.unidades += record.cant_real;
+      } else {
+        acc.push({
+          name: record.producto,
+          merma: record.merma,
+          unidades: record.cant_real
+        });
+      }
+      return acc;
+    }, [])
+    .filter(p => p.merma > 0)
+    .sort((a: any, b: any) => b.merma - a.merma)
+    .slice(0, 7);
 
   const columns = [
     { key: 'fecha_produccion' as keyof ProductionRecord, label: 'Fecha' },
@@ -276,7 +350,7 @@ export default function ProduccionView() {
             <p className="text-3xl font-bold text-white mb-2">{totalUnidades.toLocaleString()}</p>
             <div className="flex items-center gap-1 text-xs text-white/80 font-medium">
               <TrendingUp className="w-3 h-3" />
-              <span>Total real</span>
+              <span>Periodo: {dateRange.text}</span>
             </div>
           </CardContent>
         </Card>
@@ -292,7 +366,7 @@ export default function ProduccionView() {
             </div>
             <p className="text-3xl font-bold text-white mb-2">{eficienciaPromedio.toFixed(1)}%</p>
             <div className="flex items-center gap-1 text-xs text-white/80 font-medium">
-              <span>Real vs Programado</span>
+              <span>{lotesRegistrados} lotes • {dateRange.text}</span>
             </div>
           </CardContent>
         </Card>
@@ -309,7 +383,7 @@ export default function ProduccionView() {
             <p className="text-3xl font-bold text-white mb-2">{totalMerma.toLocaleString()} kg</p>
             <div className="flex items-center gap-1 text-xs text-white/80 font-medium">
               <TrendingDown className="w-3 h-3" />
-              <span>Desperdicio acumulado</span>
+              <span>{porcentajeMerma.toFixed(2)}% del total producido</span>
             </div>
           </CardContent>
         </Card>
@@ -325,7 +399,7 @@ export default function ProduccionView() {
             </div>
             <p className="text-3xl font-bold text-white mb-2">{lotesRegistrados}</p>
             <div className="flex items-center gap-1 text-xs text-white/80 font-medium">
-              <span>Órdenes completadas</span>
+              <span>Periodo: {dateRange.text}</span>
             </div>
           </CardContent>
         </Card>
@@ -343,27 +417,137 @@ export default function ProduccionView() {
         <TabsContent value="overview" className="space-y-6">
           <div className="grid grid-cols-3 gap-6">
             <div className="col-span-2">
-              <DynamicChart
-                data={chartDataByProduct}
-                type="composed"
-                title="Eficiencia de Producción"
-                description="Producción Real (Barras) vs Eficiencia % (Línea)"
-                xKey="name"
-                yKey="real"
-                yKey2="eficiencia"
-              />
+              <Card className="h-full border border-gray-200 bg-white shadow-sm hover:shadow-md transition-shadow">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-lg font-semibold text-gray-800">Eficiencia de Producción</CardTitle>
+                  <CardDescription className="text-sm text-gray-500">Producción Real (Barras) vs Eficiencia % (Línea)</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="h-[300px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <ComposedChart
+                        data={chartDataByProduct}
+                        margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                        <XAxis 
+                          dataKey="name" 
+                          tick={{ fill: '#64748b', fontSize: 11 }}
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <YAxis 
+                          yAxisId="left"
+                          tick={{ fill: '#64748b', fontSize: 11 }}
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <YAxis 
+                          yAxisId="right" 
+                          orientation="right" 
+                          domain={[0, 100]}
+                          tick={{ fill: '#64748b', fontSize: 11 }}
+                          axisLine={false}
+                          tickLine={false}
+                          unit="%"
+                        />
+                        <Tooltip 
+                          cursor={{ fill: '#f1f5f9' }}
+                          contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                        />
+                        <Bar yAxisId="left" dataKey="real" fill="#3b82f6" radius={[4, 4, 0, 0]} barSize={32} name="Producción Real" />
+                        <Line yAxisId="right" type="monotone" dataKey="eficiencia" stroke="#10b981" strokeWidth={2} dot={{ r: 4 }} name="Eficiencia %" />
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                </CardContent>
+              </Card>
             </div>
             <div>
-              <DynamicChart
-                data={chartDataByMermaCause}
-                type="bar"
-                title="Pareto de Mermas"
-                description="Causas principales de desperdicio"
-                xKey="value"
-                yKey="value"
-                nameKey="name"
-              />
+              <Card className="h-full border border-gray-200 bg-white shadow-sm hover:shadow-md transition-shadow">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-lg font-semibold text-gray-800">Pareto de Mermas</CardTitle>
+                  <CardDescription className="text-sm text-gray-500">Causas principales de desperdicio</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <div className="h-[300px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart
+                        data={chartDataByMermaCause}
+                        layout="vertical"
+                        margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+                      >
+                        <CartesianGrid strokeDasharray="3 3" horizontal={true} vertical={false} stroke="#e2e8f0" />
+                        <XAxis type="number" hide />
+                        <YAxis 
+                          dataKey="name" 
+                          type="category" 
+                          width={100}
+                          tick={{ fill: '#64748b', fontSize: 11 }}
+                          axisLine={false}
+                          tickLine={false}
+                        />
+                        <Tooltip 
+                          cursor={{ fill: '#f1f5f9' }}
+                          contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                          formatter={(value: number) => [`${value.toLocaleString()} kg`, 'Merma']}
+                        />
+                        <Bar dataKey="value" fill="#ef4444" radius={[0, 4, 4, 0]} barSize={24} />
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </CardContent>
+              </Card>
             </div>
+          </div>
+
+          {/* Nueva fila: Top Productos con Mayor Merma */}
+          <div className="grid grid-cols-1 gap-6">
+            <Card className="border border-gray-200 bg-white shadow-sm hover:shadow-md transition-shadow">
+              <CardHeader className="pb-2">
+                <CardTitle className="text-lg font-semibold text-gray-800">Top Productos con Mayor Merma</CardTitle>
+                <CardDescription className="text-sm text-gray-500">
+                  Productos que generan más desperdicio • <span className="font-mono text-xs">Optimizar recetas/procesos</span>
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="h-[280px] w-full">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart
+                      data={chartDataByProductMerma}
+                      layout="vertical"
+                      margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+                    >
+                      <CartesianGrid strokeDasharray="3 3" horizontal={true} vertical={false} stroke="#e2e8f0" />
+                      <XAxis type="number" hide />
+                      <YAxis 
+                        dataKey="name" 
+                        type="category" 
+                        width={120}
+                        tick={{ fill: '#64748b', fontSize: 11 }}
+                        axisLine={false}
+                        tickLine={false}
+                      />
+                      <Tooltip 
+                        cursor={{ fill: '#f1f5f9' }}
+                        contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                        formatter={(value: number, name: string, props: any) => {
+                          if (name === 'merma') {
+                            const porcentaje = props.payload.unidades > 0 
+                              ? ((value / props.payload.unidades) * 100).toFixed(2)
+                              : '0.00';
+                            return [`${value.toLocaleString()} kg (${porcentaje}% de producción)`, 'Merma'];
+                          }
+                          return [value, name];
+                        }}
+                        labelFormatter={(label) => `Producto: ${label}`}
+                      />
+                      <Bar dataKey="merma" fill="#f97316" radius={[0, 4, 4, 0]} barSize={24} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              </CardContent>
+            </Card>
           </div>
         </TabsContent>
 
@@ -460,20 +644,34 @@ export default function ProduccionView() {
                                 <Button
                                   variant="ghost"
                                   size="sm"
-                                  className="gap-1.5 hover:bg-blue-50 hover:text-blue-700"
+                                  className="text-blue-600 hover:text-blue-800 hover:bg-blue-50"
                                   onClick={() => setSelectedFile(file)}
                                   title="Inspeccionar datos crudos de este archivo"
                                 >
                                   <Eye className="w-4 h-4" />
-                                  Ver Detalle
                                 </Button>
                                 <Button
                                   variant="ghost"
                                   size="sm"
-                                  className="hover:bg-red-50 hover:text-red-700"
-                                  onClick={() => {
-                                    setProcessedFiles(processedFiles.filter(f => f.id !== file.id));
-                                    setAllRecords(allRecords.filter(r => r.fileId !== file.id));
+                                  className="text-red-600 hover:text-red-800 hover:bg-red-50"
+                                  onClick={async () => {
+                                    const confirmed = await confirm('¿Eliminar este archivo y todos sus registros?');
+                                    if (confirmed) {
+                                      try {
+                                        const { error } = await supabase
+                                          .from('upload_logs')
+                                          .delete()
+                                          .eq('id', file.id);
+                                        
+                                        if (error) throw error;
+                                        
+                                        await fetchData();
+                                        showSuccess('Archivo eliminado correctamente');
+                                      } catch (err) {
+                                        console.error('Error deleting file:', err);
+                                        showError('Error al eliminar el archivo');
+                                      }
+                                    }
                                   }}
                                   title="Eliminar archivo del warehouse"
                                 >
