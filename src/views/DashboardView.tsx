@@ -673,33 +673,6 @@ export default function DashboardView() {
             </Card>
           </motion.div>
 
-          {/* Producción y Merma */}
-          <motion.div variants={fadeInUp}>
-            <Card className="border-2 border-gray-200 shadow-lg">
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Package className="w-5 h-5 text-blue-600" />
-                  Análisis de Producción
-                </CardTitle>
-                <CardDescription>Producción real vs Merma generada</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="h-[250px]">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={productionTrend}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-                      <XAxis dataKey="name" tick={{ fill: '#64748b', fontSize: 11 }} />
-                      <YAxis tick={{ fill: '#64748b', fontSize: 11 }} />
-                      <Tooltip />
-                      <Legend />
-                      <Bar dataKey="produccion" fill="#3b82f6" name="Producción (pzs)" />
-                      <Bar dataKey="merma" fill="#ef4444" name="Merma (kg)" />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              </CardContent>
-            </Card>
-          </motion.div>
         </div>
 
         {/* Columna Derecha - 1/3 */}
